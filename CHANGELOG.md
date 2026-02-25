@@ -13,6 +13,6 @@ All notable changes to this repository are documented in this file.
 
 ### Changed
 
-- `ls` alias now uses `eza` with icons always enabled.
-- `ll` alias now uses `eza` with icons and git metadata.
+- `ls`/`ll` now use `eza` with `--icons=auto` when available.
+- Added fallback to native `ls -F` / `ls -laF` when `eza` is missing (useful on SSH hosts).
 - README now documents prompt behavior and icon-based listing.

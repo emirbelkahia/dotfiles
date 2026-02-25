@@ -39,10 +39,19 @@ Works on macOS and Linux (Ubuntu/Debian).
 
 ### `ls` with icons
 
-`ls` and `ll` are backed by `eza` with icons enabled:
+`ls` and `ll` use `eza` when available, with an SSH-friendly fallback:
 
-- `alias ls="eza --icons=always --group-directories-first"`
-- `alias ll="eza -la --icons=always --group-directories-first --git"`
+```zsh
+if command -v eza >/dev/null 2>&1; then
+  alias ls="eza --icons=auto --group-directories-first"
+  alias ll="eza -la --icons=auto --group-directories-first --git"
+else
+  alias ls="ls -F"
+  alias ll="ls -laF"
+fi
+```
+
+This keeps icons locally when your terminal/font supports them, and avoids broken output on remote hosts without `eza`.
 
 ### Minimal prompt (more scannable)
 
@@ -54,7 +63,7 @@ The prompt is intentionally 2 lines:
 A blank line is added before each prompt by starting `PROMPT` with a leading newline:
 
 ```zsh
-PROMPT=$'\n''%F{45}%~%f$(_prompt_env_segment)\n%F{244}>%f '
+PROMPT=$'\n%F{45}%~%f$(_prompt_env_segment)\n%F{244}>%f '
 ```
 
 `_prompt_env_segment` prints `VIRTUAL_ENV` or `CONDA_DEFAULT_ENV` only when present.

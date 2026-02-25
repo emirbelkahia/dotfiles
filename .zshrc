@@ -20,10 +20,16 @@ alias python="python3"
 alias cat="bat"
 alias grep="rg"
 alias top="btop"
-alias ls="eza --icons=always --group-directories-first"
-alias ll="eza -la --icons=always --group-directories-first --git"
 alias find="fd"
 alias claude-mem='bun "/Users/emir.belkahia/.claude/plugins/marketplaces/thedotmack/plugin/scripts/worker-service.cjs"'
+
+if command -v eza >/dev/null 2>&1; then
+  alias ls="eza --icons=auto --group-directories-first"
+  alias ll="eza -la --icons=auto --group-directories-first --git"
+else
+  alias ls="ls -F"
+  alias ll="ls -laF"
+fi
 
 # === TOOLS ===
 eval "$(zoxide init zsh)"
@@ -40,7 +46,7 @@ _prompt_env_segment() {
   fi
 }
 
-PROMPT=$'\n''%F{45}%~%f$(_prompt_env_segment)\n%F{244}>%f '
+PROMPT=$'\n%F{45}%~%f$(_prompt_env_segment)\n%F{244}>%f '
 
 # === LOCAL (secrets, overrides) ===
 [ -f ~/.zshrc.local ] && source ~/.zshrc.local
