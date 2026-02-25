@@ -8,6 +8,7 @@ Config files for my terminal setup.
 |------|-------------|
 | `.zshrc` | Shell config — aliases, PATH, tools init |
 | `.tmux.conf` | tmux — pink status bar, solid pane borders |
+| `CHANGELOG.md` | Changes history |
 
 ## Tools used
 
@@ -33,3 +34,27 @@ source ~/.zshrc
 Works on macOS and Linux (Ubuntu/Debian).
 
 > Secrets (API keys, tokens) go in `~/.zshrc.local` — never committed.
+
+## Prompt and `ls` behavior
+
+### `ls` with icons
+
+`ls` and `ll` are backed by `eza` with icons enabled:
+
+- `alias ls="eza --icons=always --group-directories-first"`
+- `alias ll="eza -la --icons=always --group-directories-first --git"`
+
+### Minimal prompt (more scannable)
+
+The prompt is intentionally 2 lines:
+
+1. Working directory + active environment (venv/conda if any)
+2. A simple `>` prompt marker
+
+A blank line is added before each prompt by starting `PROMPT` with a leading newline:
+
+```zsh
+PROMPT=$'\n''%F{45}%~%f$(_prompt_env_segment)\n%F{244}>%f '
+```
+
+`_prompt_env_segment` prints `VIRTUAL_ENV` or `CONDA_DEFAULT_ENV` only when present.
