@@ -22,6 +22,9 @@ alias grep="rg"
 alias top="btop"
 alias find="fd"
 alias claude-mem='bun "/Users/emir.belkahia/.claude/plugins/marketplaces/thedotmack/plugin/scripts/worker-service.cjs"'
+alias claude-sonnet='claude --model sonnet --dangerously-skip-permissions'
+alias claude-haiku='claude --model haiku --dangerously-skip-permissions'
+alias claude-opus='claude --model opus --dangerously-skip-permissions'
 
 if command -v eza >/dev/null 2>&1; then
   alias ls="eza --icons=auto --group-directories-first"
