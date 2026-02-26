@@ -35,6 +35,18 @@ Works on macOS and Linux (Ubuntu/Debian).
 
 > Secrets (API keys, tokens) go in `~/.zshrc.local` — never committed.
 
+## Claude aliases
+
+Three aliases to launch Claude CLI directly with a specific model and `--dangerously-skip-permissions`:
+
+| Alias | Command |
+|-------|---------|
+| `claude-sonnet` | `claude --model sonnet --dangerously-skip-permissions` |
+| `claude-haiku` | `claude --model haiku --dangerously-skip-permissions` |
+| `claude-opus` | `claude --model opus --dangerously-skip-permissions` |
+
+Model aliases are generic (e.g. `sonnet` not `claude-sonnet-4-6`) so they always point to the latest version.
+
 ## Prompt and `ls` behavior
 
 ### `ls` with icons
