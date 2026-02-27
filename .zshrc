@@ -37,6 +37,9 @@ fi
 # === TOOLS ===
 eval "$(zoxide init zsh)"
 
+# Don't let venv modify the prompt (handled manually below)
+export VIRTUAL_ENV_DISABLE_PROMPT=1
+
 # === PROMPT ===
 setopt PROMPT_SUBST
 unset RPROMPT

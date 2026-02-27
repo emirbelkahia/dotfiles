@@ -79,3 +79,11 @@ PROMPT=$'\n%F{45}%~%f$(_prompt_env_segment)\n%F{244}>%f '
 ```
 
 `_prompt_env_segment` prints `VIRTUAL_ENV` or `CONDA_DEFAULT_ENV` only when present.
+
+`VIRTUAL_ENV_DISABLE_PROMPT=1` is set to prevent the venv `activate` script from also modifying the prompt — without this, the env name would appear twice.
+
+## Fonts
+
+`install.sh` installs **JetBrains Mono Nerd Font** on macOS for icon support in `eza` and tmux.
+
+Make sure your terminal emulator is configured to use it.

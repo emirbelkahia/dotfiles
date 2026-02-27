@@ -2,6 +2,17 @@
 
 All notable changes to this repository are documented in this file.
 
+## 2026-02-27
+
+### Added
+
+- `VIRTUAL_ENV_DISABLE_PROMPT=1` — prevents venv's `activate` script from modifying the prompt, which was causing a duplicate `(venv)` to appear on its own line before the custom prompt.
+- JetBrains Mono Nerd Font added to `install.sh` — auto-installs on macOS for icon support in `eza`, tmux, etc.
+
+### Fixed
+
+- Venv prompt duplication: venv name was showing twice (once from `activate`, once from `_prompt_env_segment`).
+
 ## 2026-02-26
 
 ### Added
