@@ -7,7 +7,7 @@ Config files for my terminal setup.
 | File | Description |
 |------|-------------|
 | `.zshrc` | Shell config — aliases, PATH, tools init |
-| `.tmux.conf` | tmux — pink status bar, solid pane borders |
+| `.tmux.conf` | tmux — pink status bar, solid pane borders, mouse scroll |
 | `CHANGELOG.md` | Changes history |
 
 ## Tools used

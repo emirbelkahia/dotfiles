@@ -2,6 +2,12 @@
 
 All notable changes to this repository are documented in this file.
 
+## 2026-02-28
+
+### Added
+
+- `set -g mouse on` in `.tmux.conf` — enables mouse scroll in tmux panes. Use scroll wheel to navigate history, `q` or `Escape` to exit scroll mode.
+
 ## 2026-02-27
 
 ### Added
