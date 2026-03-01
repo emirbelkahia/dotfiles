@@ -15,6 +15,7 @@ apply() {
   defaults write com.apple.finder DisableAllAnimations -bool true
   defaults write com.apple.dock launchanim -bool false
   defaults write com.apple.dock expose-animation-duration -float 0.1
+  defaults write com.apple.dock autohide -bool true
   defaults write com.apple.dock autohide-time-modifier -float 0
   defaults write com.apple.dock autohide-delay -float 0
 
@@ -58,6 +59,7 @@ revert() {
   defaults delete com.apple.finder DisableAllAnimations 2>/dev/null
   defaults delete com.apple.dock launchanim 2>/dev/null
   defaults delete com.apple.dock expose-animation-duration 2>/dev/null
+  defaults delete com.apple.dock autohide 2>/dev/null
   defaults delete com.apple.dock autohide-time-modifier 2>/dev/null
   defaults delete com.apple.dock autohide-delay 2>/dev/null
 
