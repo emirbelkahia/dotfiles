@@ -8,6 +8,7 @@ Config files for my terminal setup.
 |------|-------------|
 | `.zshrc` | Shell config — aliases, PATH, tools init |
 | `.tmux.conf` | tmux — pink status bar, solid pane borders, mouse scroll |
+| `macos.sh` | macOS `defaults write` optimizations (animations, keyboard, Finder, screenshots) |
 | `CHANGELOG.md` | Changes history |
 
 ## Tools used
@@ -81,6 +82,24 @@ PROMPT=$'\n%F{45}%~%f$(_prompt_env_segment)\n%F{244}>%f '
 `_prompt_env_segment` prints `VIRTUAL_ENV` or `CONDA_DEFAULT_ENV` only when present.
 
 `VIRTUAL_ENV_DISABLE_PROMPT=1` is set to prevent the venv `activate` script from also modifying the prompt — without this, the env name would appear twice.
+
+## macOS optimizations
+
+`macos.sh` applies speed-focused `defaults write` settings. Run once after a fresh install:
+
+```bash
+./macos.sh          # apply all optimizations
+./macos.sh revert   # undo everything back to macOS defaults
+```
+
+What it does:
+- Disables window/Dock/Finder/Mission Control animations
+- Sets keyboard repeat to max speed
+- Finder: search current folder by default, show full path, no .DS_Store on network/USB
+- Screenshots: saved to ~/Downloads, no shadow, no thumbnail
+- Save/Print dialogs: expanded by default
+
+All changes persist across reboots. Restart recommended after apply/revert.
 
 ## Fonts
 

@@ -2,6 +2,12 @@
 
 All notable changes to this repository are documented in this file.
 
+## 2026-03-01
+
+### Added
+
+- `macos.sh` — macOS `defaults write` speed optimizations script with full revert support. Disables animations (window open/close, Dock launch bounce, Mission Control, Quick Look, Finder), sets keyboard repeat to max speed, configures Finder (search current folder, full path in title, no .DS_Store on network/USB), screenshots to ~/Downloads without shadow/thumbnail, save/print dialogs expanded by default. Run `./macos.sh revert` to undo everything.
+
 ## 2026-02-28
 
 ### Added
