@@ -101,6 +101,8 @@ What it does:
 
 All changes persist across reboots. Restart recommended after apply/revert.
 
+Inspired by [mathiasbynens/dotfiles](https://github.com/mathiasbynens/dotfiles) — specifically the [`.macos`](https://github.com/mathiasbynens/dotfiles/blob/main/.macos) script by [Mathias Bynens](https://mathiasbynens.be/), the most widely used macOS `defaults write` reference (31k+ stars).
+
 ## Fonts
 
 `install.sh` installs **JetBrains Mono Nerd Font** on macOS for icon support in `eza` and tmux.
