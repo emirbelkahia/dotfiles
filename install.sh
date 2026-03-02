@@ -11,7 +11,7 @@ if [ "$OS" = "Darwin" ]; then
     echo "Installing Homebrew..."
     /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
   fi
-  brew install bat eza fd zoxide ripgrep btop
+  brew install bat eza fd zoxide ripgrep btop zsh-autosuggestions
   brew install --cask font-jetbrains-mono-nerd-font
 
 elif [ "$OS" = "Linux" ]; then

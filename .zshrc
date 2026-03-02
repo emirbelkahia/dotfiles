@@ -36,6 +36,7 @@ fi
 
 # === TOOLS ===
 eval "$(zoxide init zsh)"
+source /opt/homebrew/share/zsh-autosuggestions/zsh-autosuggestions.zsh
 
 # Don't let venv modify the prompt (handled manually below)
 export VIRTUAL_ENV_DISABLE_PROMPT=1
