@@ -21,6 +21,7 @@ Config files for my terminal setup.
 | [ripgrep](https://github.com/BurntSushi/ripgrep) | `grep` | `brew install ripgrep` |
 | [zoxide](https://github.com/ajeetdsouza/zoxide) | `cd` | `brew install zoxide` |
 | [btop](https://github.com/aristocratos/btop) | `top` | `brew install btop` |
+| [zsh-autosuggestions](https://github.com/zsh-users/zsh-autosuggestions) | — | `brew install zsh-autosuggestions` |
 
 ## Install on a new machine
 

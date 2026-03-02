@@ -2,6 +2,12 @@
 
 All notable changes to this repository are documented in this file.
 
+## 2026-03-02
+
+### Added
+
+- `zsh-autosuggestions` — fish-like command suggestions based on history. Installed via Homebrew, sourced in `.zshrc`.
+
 ## 2026-03-01
 
 ### Added
