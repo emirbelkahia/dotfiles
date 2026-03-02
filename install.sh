@@ -12,7 +12,7 @@ if [ "$OS" = "Darwin" ]; then
     /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
   fi
   brew install bat eza fd zoxide ripgrep btop zsh-autosuggestions
-  brew install --cask font-jetbrains-mono-nerd-font
+  brew install --cask font-jetbrains-mono-nerd-font hammerspoon
 
 elif [ "$OS" = "Linux" ]; then
   # Linux (Ubuntu/Debian)
@@ -31,5 +31,7 @@ fi
 echo "🔗 Creating symlinks..."
 ln -sf "$HOME/dotfiles/.zshrc" "$HOME/.zshrc"
 ln -sf "$HOME/dotfiles/.tmux.conf" "$HOME/.tmux.conf"
+mkdir -p "$HOME/.hammerspoon"
+ln -sf "$HOME/dotfiles/hammerspoon/init.lua" "$HOME/.hammerspoon/init.lua"
 
 echo "✅ Done. Run 'source ~/.zshrc' to apply."

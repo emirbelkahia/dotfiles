@@ -8,6 +8,7 @@ All notable changes to this repository are documented in this file.
 
 - `zsh-autosuggestions` — fish-like command suggestions based on history. Installed via Homebrew, sourced in `.zshrc`.
 - Finder path bar (`ShowPathbar`) — shows the full file path at the bottom of every Finder window permanently, without holding Option.
+- `hammerspoon/init.lua` — time overlay triggered by `Cmd+Alt+T`. Displays current time in large pink text on a dark semi-transparent background for 2 seconds. Installed via `brew install --cask hammerspoon`, symlinked by `install.sh`.
 
 ## 2026-03-01
 

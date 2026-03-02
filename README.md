@@ -9,6 +9,7 @@ Config files for my terminal setup.
 | `.zshrc` | Shell config — aliases, PATH, tools init |
 | `.tmux.conf` | tmux — pink status bar, solid pane borders, mouse scroll |
 | `macos.sh` | macOS `defaults write` optimizations (animations, keyboard, Finder, screenshots) |
+| `hammerspoon/init.lua` | Hammerspoon config — time overlay on `Cmd+Alt+T` |
 | `CHANGELOG.md` | Changes history |
 
 ## Tools used
@@ -103,6 +104,16 @@ What it does:
 All changes persist across reboots. Restart recommended after apply/revert.
 
 Inspired by [mathiasbynens/dotfiles](https://github.com/mathiasbynens/dotfiles) — specifically the [`.macos`](https://github.com/mathiasbynens/dotfiles/blob/main/.macos) script by [Mathias Bynens](https://mathiasbynens.be/), the most widely used macOS `defaults write` reference (31k+ stars).
+
+## Hammerspoon — time overlay
+
+`hammerspoon/init.lua` binds `Cmd+Alt+T` to display the current time as a full-screen overlay for 2 seconds.
+
+- Big pink text, dark semi-transparent background
+- Zero CPU at rest — Hammerspoon only reacts to events
+- Useful when the menu bar is hidden
+
+`install.sh` installs Hammerspoon and symlinks `~/.hammerspoon/init.lua` to this file automatically.
 
 ## Fonts
 
