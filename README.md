@@ -96,7 +96,7 @@ PROMPT=$'\n%F{45}%~%f$(_prompt_env_segment)\n%F{244}>%f '
 What it does:
 - Disables window/Dock/Finder/Mission Control animations
 - Sets keyboard repeat to max speed
-- Finder: search current folder by default, show full path, no .DS_Store on network/USB
+- Finder: search current folder by default, show full path in title bar, path bar at bottom of windows, no .DS_Store on network/USB
 - Screenshots: saved to ~/Downloads, no shadow, no thumbnail
 - Save/Print dialogs: expanded by default
 

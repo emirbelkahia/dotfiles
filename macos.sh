@@ -28,6 +28,7 @@ apply() {
   defaults write com.apple.desktopservices DSDontWriteNetworkStores -bool true
   defaults write com.apple.desktopservices DSDontWriteUSBStores -bool true
   defaults write com.apple.finder _FXShowPosixPathInTitle -bool true        # Full path in Finder title bar
+  defaults write com.apple.finder ShowPathbar -bool true                    # Path bar at bottom of Finder windows
 
   # --- Screenshots ---
   defaults write com.apple.screencapture location ~/Downloads
@@ -72,6 +73,7 @@ revert() {
   defaults delete com.apple.desktopservices DSDontWriteNetworkStores 2>/dev/null
   defaults delete com.apple.desktopservices DSDontWriteUSBStores 2>/dev/null
   defaults delete com.apple.finder _FXShowPosixPathInTitle 2>/dev/null
+  defaults delete com.apple.finder ShowPathbar 2>/dev/null
 
   # --- Screenshots: restore defaults ---
   defaults write com.apple.screencapture location ~/Desktop
