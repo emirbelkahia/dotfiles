@@ -2,6 +2,12 @@
 
 All notable changes to this repository are documented in this file.
 
+## 2026-03-03 (2)
+
+### Changed
+
+- `bin/ooo --help` — replaced plain text extraction with a dedicated `show_help()` function using ANSI colors. Section headers in bold yellow, commands and paths in cyan, hints in gray.
+
 ## 2026-03-03
 
 ### Added
