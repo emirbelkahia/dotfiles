@@ -11,7 +11,7 @@ if [ "$OS" = "Darwin" ]; then
     echo "Installing Homebrew..."
     /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
   fi
-  brew install bat eza fd zoxide ripgrep btop zsh-autosuggestions
+  brew install bat eza fd zoxide ripgrep btop zsh-autosuggestions jq
   brew install --cask font-jetbrains-mono-nerd-font hammerspoon
 
 elif [ "$OS" = "Linux" ]; then
@@ -31,6 +31,7 @@ fi
 echo "🔗 Creating symlinks..."
 ln -sf "$HOME/dotfiles/.zshrc" "$HOME/.zshrc"
 ln -sf "$HOME/dotfiles/.tmux.conf" "$HOME/.tmux.conf"
+ln -sf "$HOME/dotfiles/bin" "$HOME/bin"
 mkdir -p "$HOME/.hammerspoon"
 ln -sf "$HOME/dotfiles/hammerspoon/init.lua" "$HOME/.hammerspoon/init.lua"
 

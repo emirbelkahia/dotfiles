@@ -2,6 +2,16 @@
 
 All notable changes to this repository are documented in this file.
 
+## 2026-03-03
+
+### Added
+
+- `bin/ooo` — Gmail out-of-office setter in pure bash (curl + jq + nc). No Python, no venv. Supports interactive mode, direct args (`ooo 2026-03-10 2026-03-17`), `--setup` for first-time OAuth via localhost callback, and `--help`. Config lives in `~/.config/ooo/` (never committed — `credentials.json` in 1Password).
+- `bin/` convention — personal CLI scripts versioned in `dotfiles/bin/`, symlinked to `~/bin` on PATH. Add scripts here to make them available on any machine after `./install.sh`.
+- `jq` added to Homebrew install in `install.sh`.
+- `$HOME/bin` added to PATH in `.zshrc`.
+- `ln -sf "$HOME/dotfiles/bin" "$HOME/bin"` added to `install.sh` symlink section.
+
 ## 2026-03-02
 
 ### Added

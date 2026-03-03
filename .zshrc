@@ -12,6 +12,7 @@ export PATH="$BUN_INSTALL/bin:$PATH"
 [ -s "/Users/emir.belkahia/.bun/_bun" ] && source "/Users/emir.belkahia/.bun/_bun"
 
 # === PATH ===
+export PATH="$HOME/bin:$PATH"
 export PATH="$HOME/.local/bin:$PATH"
 export PATH="/Users/emir.belkahia/.antigravity/antigravity/bin:$PATH"
 

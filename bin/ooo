@@ -1,0 +1,325 @@
+#!/bin/bash
+# ooo — Set Gmail out-of-office vacation responder
+#
+# USAGE
+#   ooo                        Interactive — prompts for dates
+#   ooo 2026-03-10 2026-03-17  Direct mode
+#   ooo --setup                First-time OAuth setup (new machine or expired token)
+#   ooo --help                 Show this help
+#
+# REQUIREMENTS
+#   jq  (brew install jq)
+#
+# SETUP (new machine or expired token)
+#   1. Restore ~/.config/ooo/credentials.json from 1Password
+#   2. Run: ooo --setup   (opens browser, handles OAuth automatically via localhost callback)
+#   3. ooo works normally after that
+#
+# FILES  (never committed to git — store credentials.json in 1Password)
+#   ~/.config/ooo/credentials.json  — OAuth app credentials
+#   ~/.config/ooo/token.json        — your auth token (auto-generated)
+#
+# NOTE
+#   Google refresh tokens expire after ~6 months of inactivity.
+#   If ooo fails with an auth error, re-run: ooo --setup
+
+set -euo pipefail
+
+CONFIG_DIR="$HOME/.config/ooo"
+CREDENTIALS="$CONFIG_DIR/credentials.json"
+TOKEN="$CONFIG_DIR/token.json"
+
+# ── Help ──────────────────────────────────────────────────────────────────────
+
+show_help() {
+  awk '/^# ooo/,/^[^#]/' "$0" | grep '^#' | sed 's/^# \{0,1\}//'
+}
+
+# ── Dependencies ──────────────────────────────────────────────────────────────
+
+check_deps() {
+  if ! command -v jq &>/dev/null; then
+    echo "❌ jq is required: brew install jq" >&2
+    exit 1
+  fi
+}
+
+# ── Utils ─────────────────────────────────────────────────────────────────────
+
+urlencode() {
+  local s="$1" out="" i c
+  for (( i=0; i<${#s}; i++ )); do
+    c="${s:$i:1}"
+    case "$c" in
+      [a-zA-Z0-9._~-]) out+="$c" ;;
+      *) out+=$(printf '%%%02X' "'$c") ;;
+    esac
+  done
+  echo "$out"
+}
+
+# ── OAuth ─────────────────────────────────────────────────────────────────────
+
+get_access_token() {
+  if [[ ! -f "$TOKEN" ]]; then
+    echo "❌ No token found. Run: ooo --setup" >&2
+    exit 1
+  fi
+
+  local expiry access_token
+  expiry=$(jq -r '.expiry // ""' "$TOKEN")
+  access_token=$(jq -r '.token // ""' "$TOKEN")
+
+  # Return current token if still valid (with 60s margin)
+  if [[ -n "$expiry" && -n "$access_token" ]]; then
+    local expiry_clean expiry_epoch now
+    expiry_clean="${expiry%%.*}Z"
+    expiry_epoch=$(TZ=UTC date -j -f "%Y-%m-%dT%H:%M:%SZ" "$expiry_clean" "+%s" 2>/dev/null || echo 0)
+    now=$(date -u +%s)
+    if [[ $now -lt $(( expiry_epoch - 60 )) ]]; then
+      echo "$access_token"
+      return
+    fi
+  fi
+
+  # Token expired — refresh it
+  local client_id client_secret
+  if [[ -f "$CREDENTIALS" ]]; then
+    client_id=$(jq -r '.installed.client_id' "$CREDENTIALS")
+    client_secret=$(jq -r '.installed.client_secret' "$CREDENTIALS")
+  else
+    client_id=$(jq -r '.client_id // ""' "$TOKEN")
+    client_secret=$(jq -r '.client_secret // ""' "$TOKEN")
+  fi
+  local refresh_tok
+  refresh_tok=$(jq -r '.refresh_token' "$TOKEN")
+
+  local resp new_token
+  resp=$(curl -s -X POST https://oauth2.googleapis.com/token \
+    -d "client_id=$client_id" \
+    -d "client_secret=$client_secret" \
+    -d "refresh_token=$refresh_tok" \
+    -d "grant_type=refresh_token")
+  new_token=$(echo "$resp" | jq -r '.access_token // ""')
+
+  if [[ -z "$new_token" ]]; then
+    echo "❌ Token refresh failed. Run: ooo --setup" >&2
+    exit 1
+  fi
+
+  local new_expiry
+  new_expiry=$(date -u -v+3600S "+%Y-%m-%dT%H:%M:%S.000000Z")
+  jq --arg t "$new_token" --arg e "$new_expiry" \
+    '.token = $t | .expiry = $e' "$TOKEN" > "$TOKEN.tmp" && mv "$TOKEN.tmp" "$TOKEN"
+
+  echo "$new_token"
+}
+
+setup_oauth() {
+  if [[ ! -f "$CREDENTIALS" ]]; then
+    echo "❌ credentials.json not found at: $CREDENTIALS"
+    echo "   Restore it from 1Password."
+    exit 1
+  fi
+
+  local client_id client_secret
+  client_id=$(jq -r '.installed.client_id' "$CREDENTIALS")
+  client_secret=$(jq -r '.installed.client_secret' "$CREDENTIALS")
+
+  local port=$(( (RANDOM % 8000) + 10000 ))
+  local redirect_uri="http://127.0.0.1:$port"
+
+  local auth_url="https://accounts.google.com/o/oauth2/auth"
+  auth_url+="?client_id=$(urlencode "$client_id")"
+  auth_url+="&redirect_uri=$(urlencode "$redirect_uri")"
+  auth_url+="&response_type=code"
+  auth_url+="&scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fgmail.settings.basic"
+  auth_url+="&access_type=offline&prompt=consent"
+
+  # Start nc listener before opening browser
+  local tmp_req tmp_resp
+  tmp_req=$(mktemp)
+  tmp_resp=$(mktemp)
+  printf "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html><body><h2>✓ Authorization complete. You can close this window.</h2></body></html>" \
+    > "$tmp_resp"
+  nc -l "$port" < "$tmp_resp" > "$tmp_req" &
+  local nc_pid=$!
+
+  echo "🔐 Opening browser for Google authorization..."
+  open "$auth_url"
+  echo "⏳ Waiting for authorization callback..."
+  wait $nc_pid || true
+
+  local code
+  code=$(grep -oE 'code=[^& ]+' "$tmp_req" | head -1 | cut -d= -f2 || true)
+  rm -f "$tmp_req" "$tmp_resp"
+
+  if [[ -z "$code" ]]; then
+    echo "❌ No authorization code received."
+    exit 1
+  fi
+
+  echo "🔄 Exchanging code for tokens..."
+  local resp access_token refresh_token
+  resp=$(curl -s -X POST https://oauth2.googleapis.com/token \
+    -d "code=$code" \
+    -d "client_id=$client_id" \
+    -d "client_secret=$client_secret" \
+    -d "redirect_uri=$redirect_uri" \
+    -d "grant_type=authorization_code")
+
+  access_token=$(echo "$resp" | jq -r '.access_token // ""')
+  refresh_token=$(echo "$resp" | jq -r '.refresh_token // ""')
+
+  if [[ -z "$access_token" ]]; then
+    echo "❌ Failed to get tokens:" >&2
+    echo "$resp" | jq . >&2
+    exit 1
+  fi
+
+  mkdir -p "$CONFIG_DIR"
+  local expiry
+  expiry=$(date -u -v+3600S "+%Y-%m-%dT%H:%M:%S.000000Z")
+  jq -n \
+    --arg token "$access_token" \
+    --arg refresh "$refresh_token" \
+    --arg expiry "$expiry" \
+    '{token: $token, refresh_token: $refresh, expiry: $expiry}' \
+    > "$TOKEN"
+
+  echo "✅ Setup complete! Token saved to $TOKEN"
+}
+
+# ── Dates ─────────────────────────────────────────────────────────────────────
+
+validate_dates() {
+  if ! [[ "$1" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ && "$2" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+    echo "❌ Date format must be YYYY-MM-DD (e.g. 2026-03-10)" >&2
+    exit 1
+  fi
+  if ! date -j -f "%Y-%m-%d" "$1" "+%s" &>/dev/null; then
+    echo "❌ '$1' is not a valid date" >&2
+    exit 1
+  fi
+  if ! date -j -f "%Y-%m-%d" "$2" "+%s" &>/dev/null; then
+    echo "❌ '$2' is not a valid date" >&2
+    exit 1
+  fi
+  if [[ ! "$2" > "$1" ]]; then
+    echo "❌ End date must be after start date" >&2
+    exit 1
+  fi
+}
+
+date_to_ms() {
+  echo $(( $(date -j -f "%Y-%m-%d" "$1" "+%s") * 1000 ))
+}
+
+format_date_en() {
+  local day wday month
+  day=$(( 10#$(date -j -f "%Y-%m-%d" "$1" "+%d") ))
+  wday=$(date -j -f "%Y-%m-%d" "$1" "+%A")
+  month=$(date -j -f "%Y-%m-%d" "$1" "+%b")
+  local sfx
+  case $day in 1|21|31) sfx=st;; 2|22) sfx=nd;; 3|23) sfx=rd;; *) sfx=th;; esac
+  echo "$wday $month ${day}${sfx}"
+}
+
+format_date_fr() {
+  local day wnum mnum
+  day=$(( 10#$(date -j -f "%Y-%m-%d" "$1" "+%d") ))
+  wnum=$(date -j -f "%Y-%m-%d" "$1" "+%u")
+  mnum=$(( 10#$(date -j -f "%Y-%m-%d" "$1" "+%m") ))
+  local days_fr=('' lundi mardi mercredi jeudi vendredi samedi dimanche)
+  local months_fr=('' janvier février mars avril mai juin juillet août septembre octobre novembre décembre)
+  echo "${days_fr[$wnum]} $day ${months_fr[$mnum]}"
+}
+
+# ── Message ───────────────────────────────────────────────────────────────────
+
+generate_message() {
+  local s_en e_en s_fr e_fr
+  s_en=$(format_date_en "$1"); e_en=$(format_date_en "$2")
+  s_fr=$(format_date_fr "$1"); e_fr=$(format_date_fr "$2")
+
+  printf "🇬🇧 EN - Hello,\n\nThank you for reaching out.\n\nI am out of office this %s, and I will be back on %s. I will review your email upon my return.\n\nIf your request is urgent, please contact our support team via this link:\n👉 https://support.algolia.com/hc/en-us/requests/new\n\nBest,\nEmir Belkahia – Customer Success Manager, Algolia\n\n⸻\n\n🇫🇷 FR - Bonjour,\n\nMerci pour votre message.\n\nJe suis en congés ce %s, et je serai de retour %s. Je prendrai connaissance de votre email à ce moment-là.\n\nPour toute demande urgente, vous pouvez contacter notre équipe support via le lien suivant :\n👉 https://support.algolia.com/hc/en-us/requests/new\n\nCordialement,\nEmir Belkahia – Customer Success Manager, Algolia" \
+    "$s_en" "$e_en" "$s_fr" "$e_fr"
+}
+
+# ── Gmail API ─────────────────────────────────────────────────────────────────
+
+set_vacation() {
+  local token="$1" start="$2" end="$3" msg="$4"
+
+  local start_ms end_ms
+  start_ms=$(date_to_ms "$start")
+  end_ms=$(date_to_ms "$end")
+
+  local s_short e_short
+  s_short=$(date -j -f "%Y-%m-%d" "$start" "+%b %d")
+  e_short=$(date -j -f "%Y-%m-%d" "$end" "+%b %d")
+
+  local subject="Out of Office / Absence du bureau ($s_short - $e_short)"
+  local body_html
+  body_html=$(echo "$msg" | awk '{printf "%s<br>", $0}')
+
+  local payload
+  payload=$(jq -n \
+    --arg subject "$subject" \
+    --arg body "$body_html" \
+    --argjson start "$start_ms" \
+    --argjson end "$end_ms" \
+    '{enableAutoReply:true, responseSubject:$subject, responseBodyHtml:$body,
+      restrictToContacts:false, restrictToDomain:false, startTime:$start, endTime:$end}')
+
+  local resp
+  resp=$(curl -s -X PUT \
+    "https://gmail.googleapis.com/gmail/v1/users/me/settings/vacation" \
+    -H "Authorization: Bearer $token" \
+    -H "Content-Type: application/json" \
+    -d "$payload")
+
+  if echo "$resp" | jq -e '.enableAutoReply' &>/dev/null; then
+    echo "✅ Out of office set: $start → $end"
+  else
+    echo "❌ Gmail API error:" >&2
+    echo "$resp" | jq . >&2
+    exit 1
+  fi
+}
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+main() {
+  case "${1:-}" in
+    --help|-h) show_help; exit 0 ;;
+    --setup)   check_deps; setup_oauth; exit 0 ;;
+  esac
+
+  check_deps
+
+  local start end
+  if [[ $# -eq 2 ]]; then
+    start="$1"; end="$2"
+    validate_dates "$start" "$end"
+  else
+    printf "\nStart date (YYYY-MM-DD): "
+    read -r start
+    printf "End date   (YYYY-MM-DD): "
+    read -r end
+    validate_dates "$start" "$end"
+  fi
+
+  echo "🔐 Authenticating..."
+  local access_token
+  access_token=$(get_access_token)
+
+  echo "📝 Generating message..."
+  local message
+  message=$(generate_message "$start" "$end")
+
+  echo "📧 Setting vacation responder..."
+  set_vacation "$access_token" "$start" "$end" "$message"
+}
+
+main "$@"
