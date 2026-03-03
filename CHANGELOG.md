@@ -2,6 +2,12 @@
 
 All notable changes to this repository are documented in this file.
 
+## 2026-03-03 (3)
+
+### Added
+
+- `bin/tc` — call transcription tool migrated from Desktop `transcribe_callv3.command`. Pure bash, unchanged logic. Hardcoded paths replaced with `$HOME`. Colored `--help` added (usage, what it does, output paths, full new-machine setup instructions for whisper.cpp). `ffmpeg` added to Homebrew install in `install.sh`.
+
 ## 2026-03-03 (2)
 
 ### Changed

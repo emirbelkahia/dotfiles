@@ -1,0 +1,300 @@
+#!/bin/bash
+# tc — Transcribe a call recording and generate a CSM summary prompt
+
+set -euo pipefail
+
+# === CONFIG ===
+MOVIES_DIR="$HOME/Movies"
+NOTES_DIR="$HOME/Notes/Calls"
+WHISPER_DIR="$HOME/whisper.cpp"
+WHISPER_BIN="$WHISPER_DIR/build/bin/whisper-cli"
+WHISPER_MODEL="$WHISPER_DIR/models/ggml-large-v3-turbo.bin"
+VAD_MODEL="$WHISPER_DIR/models/for-tests-silero-v5.1.2-ggml.bin"
+SAMPLE_RATE=16000
+
+# VAD defaults
+VAD_ENABLED=true
+VAD_THRESHOLD=0.5
+
+# ── Help ──────────────────────────────────────────────────────────────────────
+
+show_help() {
+  local b='\033[1m'
+  local y='\033[33m'
+  local c='\033[36m'
+  local g='\033[90m'
+  local r='\033[0m'
+
+  printf "${b}tc${r} — Transcribe a call recording and generate a CSM summary prompt\n"
+  printf "\n"
+  printf "${b}${y}USAGE${r}\n"
+  printf "  ${c}tc${r}          Interactive — auto-detects today's or yesterday's recording\n"
+  printf "  ${c}tc --help${r}   Show this help\n"
+  printf "\n"
+  printf "${b}${y}WHAT IT DOES${r}\n"
+  printf "  1. Auto-detects today's (or yesterday's) call recording in ${c}~/Movies${r}\n"
+  printf "  2. Converts audio to WAV 16kHz mono via ffmpeg\n"
+  printf "  3. Transcribes with Whisper large-v3-turbo + optional VAD\n"
+  printf "  4. Generates a CSM internal Slack-ready Markdown prompt\n"
+  printf "  5. Opens the prompt in TextEdit — paste into Claude or ChatGPT\n"
+  printf "\n"
+  printf "${b}${y}OUTPUT${r}\n"
+  printf "  ${c}~/Notes/Calls/YYYY-MM-DD_call-name.txt${r}        ${g}← transcript${r}\n"
+  printf "  ${c}~/Notes/Calls/YYYY-MM-DD_call-name_prompt.txt${r}  ${g}← generated prompt${r}\n"
+  printf "\n"
+  printf "${b}${y}DEPENDENCIES${r}\n"
+  printf "  ${c}ffmpeg${r}       ${g}brew install ffmpeg  (handled by install.sh)${r}\n"
+  printf "  ${c}whisper.cpp${r}  ${g}see SETUP below${r}\n"
+  printf "\n"
+  printf "${b}${y}SETUP${r}  ${g}(new machine — one time)${r}\n"
+  printf "  ${g}# 1. Clone and build whisper.cpp${r}\n"
+  printf "  ${c}git clone https://github.com/ggerganov/whisper.cpp.git ~/whisper.cpp${r}\n"
+  printf "  ${c}cmake -B ~/whisper.cpp/build ~/whisper.cpp${r}\n"
+  printf "  ${c}cmake --build ~/whisper.cpp/build --config Release${r}\n"
+  printf "\n"
+  printf "  ${g}# 2. Download models into ~/whisper.cpp/models/${r}\n"
+  printf "  ${c}cd ~/whisper.cpp && bash models/download-ggml-model.sh large-v3-turbo${r}\n"
+  printf "  ${g}# VAD model: download for-tests-silero-v5.1.2-ggml.bin from whisper.cpp releases${r}\n"
+  printf "\n"
+  printf "  ${g}# 3. Recordings must be named YYYY-MM-DD*.mov or *.mp4 and placed in ~/Movies${r}\n"
+}
+
+case "${1:-}" in
+  --help|-h) show_help; exit 0 ;;
+esac
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+mkdir -p "$NOTES_DIR"
+
+# === LOGGING ===
+TODAY=$(date "+%Y-%m-%d")
+LOG_PREFIX="$NOTES_DIR/${TODAY}_prompt_debug"
+exec > >(tee -a "${LOG_PREFIX}.log") 2>&1
+
+# Cleanup on abnormal exit
+cleanup() {
+  if [[ -n "${WAV_PATH:-}" && -f "$WAV_PATH" ]]; then rm -f "$WAV_PATH"; fi
+}
+trap cleanup EXIT
+
+echo "═══════════════════════════════════════════════════════════════"
+echo "  🎙️  Transcription Call v3 - avec VAD (Voice Activity Detection)"
+echo "═══════════════════════════════════════════════════════════════"
+echo ""
+
+# === FIND VIDEO FILE ===
+IFS=$'\n' read -r -d '' -a CALLS_TODAY < <(find "$MOVIES_DIR" -type f \( -name "${TODAY}*.mov" -o -name "${TODAY}*.mp4" \) | sort && printf '\0')
+SEARCH_DATE="$TODAY"
+CALLS_FOUND=("${CALLS_TODAY[@]+"${CALLS_TODAY[@]}"}")
+
+# If nothing found today, look at yesterday
+if [ ${#CALLS_FOUND[@]} -eq 0 ]; then
+  YESTERDAY=$(date -d "yesterday" "+%Y-%m-%d" 2>/dev/null || date -v-1d "+%Y-%m-%d")
+  echo "🔍 Aucun fichier trouvé aujourd'hui ($TODAY), recherche hier ($YESTERDAY)..."
+  IFS=$'\n' read -r -d '' -a CALLS_YESTERDAY < <(find "$MOVIES_DIR" -type f \( -name "${YESTERDAY}*.mov" -o -name "${YESTERDAY}*.mp4" \) | sort && printf '\0')
+
+  if [ ${#CALLS_YESTERDAY[@]} -gt 0 ]; then
+    echo "📂 ${#CALLS_YESTERDAY[@]} fichier(s) trouvé(s) hier."
+    read -r -p "Veux-tu procéder avec un fichier d'hier ? (o/N) : " PROCEED_YESTERDAY
+    PROCEED_YESTERDAY=$(echo "$PROCEED_YESTERDAY" | tr '[:upper:]' '[:lower:]')
+
+    if [[ "$PROCEED_YESTERDAY" =~ ^(o|oui|y|yes)$ ]]; then
+      SEARCH_DATE="$YESTERDAY"
+      CALLS_FOUND=("${CALLS_YESTERDAY[@]+"${CALLS_YESTERDAY[@]}"}")
+    else
+      echo "👋 Opération annulée."
+      exit 0
+    fi
+  else
+    SEARCH_DATE="$YESTERDAY"
+    CALLS_FOUND=("${CALLS_YESTERDAY[@]+"${CALLS_YESTERDAY[@]}"}")
+  fi
+fi
+
+if [ ${#CALLS_FOUND[@]} -eq 0 ]; then
+  echo "❌ Aucun fichier .mov ou .mp4 trouvé aujourd'hui ($TODAY) ni hier (${YESTERDAY:-inconnu})"
+  afplay /System/Library/Sounds/Basso.aiff || true
+  exit 1
+elif [ ${#CALLS_FOUND[@]} -eq 1 ]; then
+  SELECTED_FILE="${CALLS_FOUND[0]}"
+  echo "📹 Fichier détecté : $SELECTED_FILE"
+else
+  echo "📋 Plusieurs fichiers trouvés le $SEARCH_DATE. Lequel veux-tu utiliser ?"
+  select OPTION in "${CALLS_FOUND[@]}"; do
+    if [[ -n "${OPTION:-}" ]]; then
+      SELECTED_FILE="$OPTION"
+      break
+    else
+      echo "❌ Choix invalide, essaie encore"
+    fi
+  done
+fi
+
+# === CALL NAME ===
+echo ""
+read -r -p "📝 Nom du call (ex: demo-client-x) : " CALL_NAME
+CALL_NAME_CLEAN=$(echo "$CALL_NAME" | tr ' ' '-' | tr -cd '[:alnum:]-_')
+BASENAME="${SEARCH_DATE}_${CALL_NAME_CLEAN}"
+WAV_PATH="$MOVIES_DIR/${BASENAME}.wav"
+TXT_PATH="$MOVIES_DIR/${BASENAME}.txt"
+RAW_TRANSCRIPT="${WAV_PATH}.txt"
+PROMPT_PATH="$NOTES_DIR/${BASENAME}_prompt.txt"
+
+# === LANGUAGE ===
+DEFAULT_LANG="fr"
+read -r -p "🌍 Langue du call (code 2 lettres, ex: fr/en) [${DEFAULT_LANG}] ou 'auto' : " LANGUAGE
+LANGUAGE=${LANGUAGE:-$DEFAULT_LANG}
+LANGUAGE=$(echo "$LANGUAGE" | tr '[:upper:]' '[:lower:]')
+
+if ! [[ "$LANGUAGE" =~ ^[a-z]{2}$ || "$LANGUAGE" == "auto" ]]; then
+  echo "⚠️ Code langue invalide. Utilisation du défaut '${DEFAULT_LANG}'."
+  LANGUAGE="$DEFAULT_LANG"
+fi
+
+# === VAD CONFIGURATION ===
+echo ""
+echo "🎯 Voice Activity Detection (VAD) - Filtre les silences pour éviter les hallucinations"
+read -r -p "   Activer VAD ? (O/n) [O] : " VAD_CHOICE
+VAD_CHOICE=$(echo "${VAD_CHOICE:-o}" | tr '[:upper:]' '[:lower:]')
+
+if [[ "$VAD_CHOICE" =~ ^(n|no|non)$ ]]; then
+  VAD_ENABLED=false
+  echo "   ⚠️  VAD désactivé - risque d'hallucinations sur les silences"
+else
+  VAD_ENABLED=true
+  echo "   ✅ VAD activé"
+
+  if [ ! -f "$VAD_MODEL" ]; then
+    echo "   ❌ Modèle VAD non trouvé: $VAD_MODEL"
+    echo "   Téléchargement nécessaire ou désactivation du VAD."
+    VAD_ENABLED=false
+  else
+    read -r -p "   Seuil VAD (0.3=sensible, 0.5=normal, 0.7=strict) [0.5] : " VAD_THRESHOLD_INPUT
+    if [[ -n "$VAD_THRESHOLD_INPUT" && "$VAD_THRESHOLD_INPUT" =~ ^0\.[0-9]+$ ]]; then
+      VAD_THRESHOLD="$VAD_THRESHOLD_INPUT"
+    fi
+    echo "   Seuil: $VAD_THRESHOLD"
+  fi
+fi
+
+# === CHECK EXISTING TRANSCRIPTS ===
+IFS=$'\n' read -r -d '' -a TXT_CANDIDATES < <(find "$MOVIES_DIR" -type f -name "${SEARCH_DATE}*.txt" | sort && printf '\0')
+USE_EXISTING=""
+
+if [ ${#TXT_CANDIDATES[@]} -gt 0 ]; then
+  echo ""
+  echo "📄 Des transcriptions .txt existent déjà pour le $SEARCH_DATE. Tu veux en utiliser une ?"
+  select EXISTING_TXT in "${TXT_CANDIDATES[@]}" "Entrée pour une nouvelle transcription"; do
+    if [[ "$REPLY" == "$((${#TXT_CANDIDATES[@]}+1))" ]] || [[ -z "${REPLY:-}" ]]; then
+      echo "👉 Ok, on va en créer une nouvelle."
+      break
+    elif [[ -n "${EXISTING_TXT:-}" ]]; then
+      USE_EXISTING="$EXISTING_TXT"
+      echo "✅ On va utiliser : $USE_EXISTING"
+      if [[ "$(realpath "$USE_EXISTING")" != "$(realpath "$TXT_PATH" 2>/dev/null || echo "$TXT_PATH")" ]]; then
+        cp "$USE_EXISTING" "$TXT_PATH"
+      else
+        echo "ℹ️  Fichier déjà au bon emplacement, pas besoin de copier."
+      fi
+      TXT_PATH="$USE_EXISTING"
+      break
+    else
+      echo "❌ Choix invalide, essaie encore"
+    fi
+  done
+fi
+
+# === TRANSCRIBE ===
+if [ ! -f "$TXT_PATH" ]; then
+  echo ""
+  echo "🎧 Conversion en WAV (16kHz mono)..."
+  ffmpeg -y -i "$SELECTED_FILE" -ar $SAMPLE_RATE -ac 1 -c:a pcm_s16le "$WAV_PATH" 2>/dev/null
+
+  DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$WAV_PATH" 2>/dev/null | cut -d. -f1)
+  DURATION_MIN=$((DURATION / 60))
+  DURATION_SEC=$((DURATION % 60))
+  echo "   Durée: ${DURATION_MIN}m ${DURATION_SEC}s"
+
+  echo ""
+  echo "🧠 Transcription avec Whisper..."
+
+  WHISPER_ARGS=(-m "$WHISPER_MODEL" -f "$WAV_PATH" -otxt)
+
+  if [[ "$LANGUAGE" != "auto" ]]; then
+    WHISPER_ARGS+=(--language "$LANGUAGE")
+  fi
+
+  if [[ "$VAD_ENABLED" == true ]]; then
+    echo "   🎯 VAD activé (seuil: $VAD_THRESHOLD)"
+    WHISPER_ARGS+=(--vad)
+    WHISPER_ARGS+=(--vad-model "$VAD_MODEL")
+    WHISPER_ARGS+=(--vad-threshold "$VAD_THRESHOLD")
+  fi
+
+  "$WHISPER_BIN" "${WHISPER_ARGS[@]}"
+
+  if [ -f "$RAW_TRANSCRIPT" ]; then
+    mv "$RAW_TRANSCRIPT" "$TXT_PATH"
+    rm -f "$WAV_PATH"
+    LINE_COUNT=$(wc -l < "$TXT_PATH" | tr -d ' ')
+    echo ""
+    echo "✅ Transcription terminée: $LINE_COUNT lignes"
+  else
+    echo "❌ Erreur : transcription manquante."
+    afplay /System/Library/Sounds/Basso.aiff || true
+    exit 1
+  fi
+fi
+
+# === CONTEXT + PROMPT ===
+echo ""
+read -r -p "🧾 Quel est le contexte du call ? (client, enjeux, objectif) : " CONTEXT
+
+TRANSCRIPT=$(cat "$TXT_PATH")
+
+PROMPT=$(cat <<EOF
+You are a world-class Customer Success Manager (CSM), working at Algolia.
+
+You are Emir Belkahia, and you're writing an internal update for your colleagues (not for the client). Your tone must reflect ownership, strategic thinking, and clear next steps. This message is meant to be shared in Slack internally, to help the team understand what's important about this customer interaction, how it impacts the account, and what actions are needed.
+
+---
+
+Always respond in professional, structured English, and format the response in Markdown ready to be pasted in Slack.
+
+Start your summary with a **clear title** that includes the name of the client and the topic of the call, like:
+"# 📞 Statut merch – Raja France – ${SEARCH_DATE}"
+
+Here is the context of the call:
+$CONTEXT
+
+Here is the full call transcript (language code: ${LANGUAGE}):
+$TRANSCRIPT
+
+---
+
+Structure your response like this:
+
+# 🧠 TL;DR
+(1-2 sentence high-level summary)
+
+# 📌 Key Points
+- Bullet points summarizing strategic takeaways, blockers, goals, risks, decisions, etc.
+
+# ✅ Next Steps
+- [ ] Action item 1 (clearly phrased, ideally with assignee or implicit owner)
+- [ ] Action item 2
+EOF
+)
+
+echo "$PROMPT" > "$PROMPT_PATH"
+echo ""
+echo "═══════════════════════════════════════════════════════════════"
+echo "✅ Terminé !"
+echo ""
+echo "📄 Transcription : $TXT_PATH"
+echo "📝 Prompt ChatGPT : $PROMPT_PATH"
+echo "═══════════════════════════════════════════════════════════════"
+
+open -a TextEdit "$PROMPT_PATH"
+afplay /System/Library/Sounds/Funk.aiff || true
