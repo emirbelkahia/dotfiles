@@ -50,6 +50,7 @@ Personal scripts live in `bin/` and are symlinked to `~/bin` by `install.sh`. Th
 |--------|-------------|
 | `ooo` | Set Gmail out-of-office vacation responder |
 | `tc` | Transcribe a call recording and generate a CSM summary prompt |
+| `wt` | Transcribe any audio or video file with Whisper |
 
 ### `ooo` — out of office
 
@@ -89,6 +90,18 @@ cmake --build ~/whisper.cpp/build --config Release
 ```
 2. Download models into `~/whisper.cpp/models/` — see `tc --help`
 3. `ffmpeg` is handled by `install.sh`
+
+### `wt` — whisper transcribe
+
+Generic transcription for any audio or video file. No workflow, no prompt — just raw transcript output next to the source file.
+
+```bash
+wt file.mp3      # transcribe directly
+wt               # interactive — prompts for file path
+wt --help
+```
+
+> For whisper.cpp setup, see `tc --help`.
 
 ## Claude aliases
 

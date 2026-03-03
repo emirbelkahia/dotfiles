@@ -1,0 +1,119 @@
+#!/bin/bash
+# wt — Transcribe any audio or video file with Whisper
+
+set -euo pipefail
+
+WHISPER_BIN="$HOME/whisper.cpp/build/bin/main"
+WHISPER_MODEL="$HOME/whisper.cpp/models/ggml-large-v3-turbo.bin"
+
+# ── Help ──────────────────────────────────────────────────────────────────────
+
+show_help() {
+  local b='\033[1m'
+  local y='\033[33m'
+  local c='\033[36m'
+  local g='\033[90m'
+  local r='\033[0m'
+
+  printf "${b}wt${r} — Transcribe any audio or video file with Whisper\n"
+  printf "\n"
+  printf "${b}${y}USAGE${r}\n"
+  printf "  ${c}wt file.mp3${r}          Transcribe a file\n"
+  printf "  ${c}wt${r}                   Interactive — prompts for file path\n"
+  printf "  ${c}wt --help${r}            Show this help\n"
+  printf "\n"
+  printf "${b}${y}WHAT IT DOES${r}\n"
+  printf "  1. Accepts any audio or video file (mp3, mp4, mov, m4a, wav...)\n"
+  printf "  2. Converts to WAV 16kHz mono via ffmpeg\n"
+  printf "  3. Transcribes with Whisper large-v3-turbo\n"
+  printf "  4. Outputs ${c}filename_transcript.txt${r} next to the source file\n"
+  printf "\n"
+  printf "${b}${y}DEPENDENCIES${r}\n"
+  printf "  ${c}ffmpeg${r}       ${g}brew install ffmpeg  (handled by install.sh)${r}\n"
+  printf "  ${c}whisper.cpp${r}  ${g}see tc --help for setup instructions${r}\n"
+}
+
+case "${1:-}" in
+  --help|-h) show_help; exit 0 ;;
+esac
+
+# ── Checks ────────────────────────────────────────────────────────────────────
+
+if [ ! -f "$WHISPER_BIN" ]; then
+  echo "❌ whisper.cpp not found at $WHISPER_BIN" >&2
+  echo "   Run: tc --help for setup instructions" >&2
+  exit 1
+fi
+
+# ── Language ──────────────────────────────────────────────────────────────────
+
+echo "🌍 Language:"
+echo "  1) Français"
+echo "  2) English"
+read -rp "Choice [1]: " lang_choice
+case "${lang_choice:-1}" in
+  2) LANG_CODE="en" ;;
+  *) LANG_CODE="fr" ;;
+esac
+echo ""
+
+# ── Input file ────────────────────────────────────────────────────────────────
+
+if [ -n "${1:-}" ]; then
+  INPUT_FILE="$1"
+else
+  echo "📁 Drag and drop your file here or enter the path:"
+  read -rp "> " INPUT_FILE
+  INPUT_FILE="${INPUT_FILE//\'/}"
+  INPUT_FILE="${INPUT_FILE//\"/}"
+  INPUT_FILE="$(echo "$INPUT_FILE" | xargs)"
+fi
+
+if [ ! -f "$INPUT_FILE" ]; then
+  echo "❌ File not found: $INPUT_FILE" >&2
+  exit 1
+fi
+
+# ── Transcribe ────────────────────────────────────────────────────────────────
+
+FILENAME=$(basename "$INPUT_FILE")
+DIRNAME=$(dirname "$INPUT_FILE")
+BASENAME="${FILENAME%.*}"
+OUTPUT_FILE="${DIRNAME}/${BASENAME}_transcript.txt"
+TEMP_WAV="${DIRNAME}/${BASENAME}_temp.wav"
+
+echo "📄 File: $FILENAME"
+echo "🌍 Language: $LANG_CODE"
+echo "💾 Output: ${BASENAME}_transcript.txt"
+echo ""
+
+echo "🔄 Converting to WAV 16kHz..."
+ffmpeg -i "$INPUT_FILE" -ar 16000 -ac 1 -c:a pcm_s16le -y "$TEMP_WAV" 2>/dev/null
+
+echo "🧠 Transcribing with Whisper..."
+"$WHISPER_BIN" \
+  -m "$WHISPER_MODEL" \
+  -f "$TEMP_WAV" \
+  -l "$LANG_CODE" \
+  -otxt \
+  -of "${DIRNAME}/${BASENAME}_transcript"
+
+rm -f "$TEMP_WAV"
+
+if [ -f "$OUTPUT_FILE" ]; then
+  echo ""
+  echo "✅ Done: $OUTPUT_FILE"
+  echo ""
+  echo "📝 Preview:"
+  echo "───────────────────────────────────"
+  head -n 5 "$OUTPUT_FILE"
+  echo "───────────────────────────────────"
+  echo ""
+  read -rp "Open file? (y/N): " open_choice
+  case "${open_choice:-n}" in
+    y|Y) open "$OUTPUT_FILE" ;;
+  esac
+else
+  echo "❌ Transcription failed." >&2
+  exit 1
+fi

@@ -2,6 +2,17 @@
 
 All notable changes to this repository are documented in this file.
 
+## 2026-03-03 (4)
+
+### Added
+
+- `bin/wt` — generic Whisper transcription tool. Accepts any audio/video file (mp3, mp4, mov, m4a...), outputs `filename_transcript.txt` next to the source. Replaces `WhisperTranscribe.app` from Desktop and `~/developpement/whisper-transcription/` (not a git repo — deleted).
+
+### Removed
+
+- `Desktop/WhisperTranscribe.app` — replaced by `wt`
+- `~/developpement/whisper-transcription/` — not versioned, deleted
+
 ## 2026-03-03 (3)
 
 ### Added
