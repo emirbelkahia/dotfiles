@@ -69,9 +69,6 @@ mkdir -p "$NOTES_DIR"
 
 # === LOGGING ===
 TODAY=$(date "+%Y-%m-%d")
-LOG_PREFIX="$NOTES_DIR/${TODAY}_prompt_debug"
-exec > >(tee -a "${LOG_PREFIX}.log") 2>&1
-
 # Cleanup on abnormal exit
 cleanup() {
   if [[ -n "${WAV_PATH:-}" && -f "$WAV_PATH" ]]; then rm -f "$WAV_PATH"; fi
