@@ -80,6 +80,10 @@ tc          # interactive
 tc --help   # full usage, setup instructions, output paths
 ```
 
+Output:
+- `~/Movies/YYYY-MM-DD_call-name.txt` — transcript
+- `~/Notes/Calls/YYYY-MM-DD_call-name_prompt.txt` — generated prompt
+
 **First-time setup on a new machine:**
 
 1. Clone and build whisper.cpp:

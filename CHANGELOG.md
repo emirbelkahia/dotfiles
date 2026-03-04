@@ -2,6 +2,12 @@
 
 All notable changes to this repository are documented in this file.
 
+## 2026-03-04
+
+### Fixed
+
+- `bin/tc --help` — OUTPUT section incorrectly listed the transcript path as `~/Notes/Calls/YYYY-MM-DD_call-name.txt`. Transcript is actually saved to `~/Movies/`. Only the generated prompt goes to `~/Notes/Calls/`.
+
 ## 2026-03-03 (4)
 
 ### Added

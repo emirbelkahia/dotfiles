@@ -39,7 +39,7 @@ show_help() {
   printf "  5. Opens the prompt in TextEdit — paste into Claude or ChatGPT\n"
   printf "\n"
   printf "${b}${y}OUTPUT${r}\n"
-  printf "  ${c}~/Notes/Calls/YYYY-MM-DD_call-name.txt${r}        ${g}← transcript${r}\n"
+  printf "  ${c}~/Movies/YYYY-MM-DD_call-name.txt${r}              ${g}← transcript${r}\n"
   printf "  ${c}~/Notes/Calls/YYYY-MM-DD_call-name_prompt.txt${r}  ${g}← generated prompt${r}\n"
   printf "\n"
   printf "${b}${y}DEPENDENCIES${r}\n"
