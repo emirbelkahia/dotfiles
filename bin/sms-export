@@ -96,12 +96,23 @@ def find_backup() -> tuple[Path, Path, datetime]:
             "  → Branchez l'iPhone, ouvrez Finder, sélectionnez l'iPhone,\n"
             "    cliquez 'Sauvegarder maintenant' (sans chiffrement).")
 
+    def backup_label(d: Path) -> str:
+        info_path = d / "Info.plist"
+        if info_path.exists():
+            with open(info_path, "rb") as f:
+                info = plistlib.load(f)
+            device = info.get("Device Name") or info.get("Display Name") or d.name
+            date   = info.get("Last Backup Date")
+            date_s = date.strftime("%d/%m/%Y %H:%M") if date else "date inconnue"
+            return f"{device}  {G}({date_s}){R}"
+        return d.name
+
     if len(backups) == 1:
         backup_dir = backups[0]
     else:
         print("Plusieurs backups trouvés :")
         for i, b in enumerate(backups, 1):
-            print(f"  {i}. {b.name}")
+            print(f"  {i}. {backup_label(b)}")
         choice = input("Lequel utiliser ? (numéro) : ").strip()
         try:
             backup_dir = backups[int(choice) - 1]
