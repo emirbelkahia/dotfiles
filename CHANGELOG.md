@@ -2,6 +2,12 @@
 
 All notable changes to this repository are documented in this file.
 
+## 2026-03-04 (2)
+
+### Added
+
+- `bin/sms-export` — exports iPhone messages from a local Finder backup to a standalone HTML file. Auto-detects the SMS SQLite database in `~/Library/Application Support/MobileSync/Backup/`, reads all iMessage/SMS conversations, generates `~/Desktop/messages_iphone.html` with a two-pane UI (sidebar + message bubbles), search bar, and opens it in the browser. No iCloud, no paid tools. Requires an unencrypted local backup via Finder.
+
 ## 2026-03-04
 
 ### Fixed

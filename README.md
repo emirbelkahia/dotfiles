@@ -51,6 +51,7 @@ Personal scripts live in `bin/` and are symlinked to `~/bin` by `install.sh`. Th
 | `ooo` | Set Gmail out-of-office vacation responder |
 | `tc` | Transcribe a call recording and generate a CSM summary prompt |
 | `wt` | Transcribe any audio or video file with Whisper |
+| `sms-export` | Export iPhone messages from a local Finder backup to HTML |
 
 ### `ooo` — out of office
 
@@ -94,6 +95,19 @@ cmake --build ~/whisper.cpp/build --config Release
 ```
 2. Download models into `~/whisper.cpp/models/` — see `tc --help`
 3. `ffmpeg` is handled by `install.sh`
+
+### `sms-export` — iPhone messages to HTML
+
+Exports all iMessage/SMS conversations from a local Finder backup to a standalone HTML file. No iCloud, no paid tools.
+
+```bash
+sms-export        # auto-detect backup, generate ~/Desktop/messages_iphone.html
+sms-export --help
+```
+
+Output: `~/Desktop/messages_iphone.html` — two-pane UI with conversation list, search bar, and message bubbles.
+
+**Requirements:** a local (unencrypted) iPhone backup made via Finder. Plug iPhone → open Finder → select iPhone → *Back Up Now* (ensure "Encrypt local backup" is **not** checked).
 
 ### `wt` — whisper transcribe
 

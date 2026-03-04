@@ -1,0 +1,302 @@
+#!/usr/bin/env python3
+"""sms-export — Export iPhone messages from a local Finder backup to HTML"""
+
+import sqlite3
+import shutil
+import sys
+import subprocess
+import tempfile
+import webbrowser
+from datetime import datetime
+from pathlib import Path
+
+BACKUP_DIR = Path.home() / "Library/Application Support/MobileSync/Backup"
+SMS_HASH   = "3d0d7e5fb2ce288813306e4d4636395e047a3d28"
+APPLE_EPOCH = 978307200  # seconds between Unix epoch and Apple epoch (2001-01-01)
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def apple_ts(ts):
+    if not ts:
+        return None
+    if ts > 1_000_000_000_000:  # nanoseconds (iOS 11+)
+        ts /= 1_000_000_000
+    try:
+        return datetime.fromtimestamp(ts + APPLE_EPOCH)
+    except Exception:
+        return None
+
+def h(s):
+    if not s:
+        return ""
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+# ── Backup detection ──────────────────────────────────────────────────────────
+
+def find_sms_db():
+    if not BACKUP_DIR.exists():
+        die("Aucun backup trouvé. Branchez votre iPhone et faites un backup via Finder.")
+
+    backups = [d for d in BACKUP_DIR.iterdir() if d.is_dir() and (d / SMS_HASH).exists()]
+
+    if not backups:
+        die("Aucune base SMS trouvée.\n"
+            "  → Branchez l'iPhone, ouvrez Finder, sélectionnez l'iPhone,\n"
+            "    cliquez 'Sauvegarder maintenant' (sans chiffrement).")
+
+    if len(backups) == 1:
+        return backups[0] / SMS_HASH
+
+    print("Plusieurs backups trouvés :")
+    for i, b in enumerate(backups, 1):
+        print(f"  {i}. {b.name}")
+    choice = input("Lequel utiliser ? (numéro) : ").strip()
+    try:
+        return backups[int(choice) - 1] / SMS_HASH
+    except (ValueError, IndexError):
+        die("Choix invalide.")
+
+# ── Data loading ──────────────────────────────────────────────────────────────
+
+def load_conversations(db_path):
+    tmp = Path(tempfile.mktemp(suffix=".db"))
+    shutil.copy2(db_path, tmp)
+
+    try:
+        conn = sqlite3.connect(tmp)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+
+        # Smoke-test for encryption
+        try:
+            cur.execute("SELECT count(*) FROM message")
+        except sqlite3.DatabaseError:
+            die("La base est chiffrée.\n"
+                "  → Refaites le backup dans Finder sans cocher 'Chiffrer le backup local'.")
+
+        # Handles (phone numbers / emails)
+        cur.execute("SELECT ROWID, id FROM handle")
+        handles = {r["ROWID"]: r["id"] for r in cur.fetchall()}
+
+        # Chats
+        cur.execute("SELECT ROWID, chat_identifier, display_name FROM chat")
+        chats = {r["ROWID"]: {"id": r["chat_identifier"], "name": r["display_name"]}
+                 for r in cur.fetchall()}
+
+        # Message → chat mapping
+        cur.execute("SELECT chat_id, message_id FROM chat_message_join")
+        msg_to_chat = {r["message_id"]: r["chat_id"] for r in cur.fetchall()}
+
+        # Messages
+        cur.execute("""
+            SELECT ROWID, text, date, is_from_me, handle_id, service
+            FROM message
+            ORDER BY date ASC
+        """)
+
+        conversations = {}
+        for row in cur.fetchall():
+            text = (row["text"] or "").strip()
+            if not text:
+                continue
+
+            chat_id = msg_to_chat.get(row["ROWID"])
+            if chat_id and chat_id in chats:
+                info = chats[chat_id]
+                key  = info["id"]
+                name = info["name"] or info["id"]
+            else:
+                key  = handles.get(row["handle_id"], "Inconnu")
+                name = key
+
+            if key not in conversations:
+                conversations[key] = {"name": name, "messages": []}
+
+            conversations[key]["messages"].append({
+                "text":     text,
+                "date":     apple_ts(row["date"]),
+                "from_me":  bool(row["is_from_me"]),
+                "service":  row["service"] or "",
+            })
+
+        conn.close()
+        return conversations
+
+    finally:
+        tmp.unlink(missing_ok=True)
+
+# ── HTML generation ───────────────────────────────────────────────────────────
+
+def generate_html(conversations):
+    sorted_convos = sorted(
+        conversations.items(),
+        key=lambda x: max(
+            (m["date"] for m in x[1]["messages"] if m["date"]),
+            default=datetime.min
+        ),
+        reverse=True,
+    )
+
+    sidebar_items = ""
+    panels        = ""
+
+    for i, (key, convo) in enumerate(sorted_convos):
+        name = convo["name"] or key
+        msgs = convo["messages"]
+        last = next((m for m in reversed(msgs) if m["date"]), None)
+        last_date = last["date"].strftime("%d/%m/%Y") if last else ""
+        preview   = next((m["text"][:60] for m in reversed(msgs)), "")
+        sid       = f"c{i}"
+
+        sidebar_items += f"""
+        <div class="ci" onclick="show('{sid}')" id="i{sid}">
+          <div class="cn">{h(name)}</div>
+          <div class="cm">{last_date} · {len(msgs)} messages</div>
+          <div class="cp">{h(preview)}</div>
+        </div>"""
+
+        bubbles  = ""
+        prev_dt  = None
+        for m in msgs:
+            dt = m["date"]
+            if dt and (prev_dt is None or (dt - prev_dt).total_seconds() > 3600):
+                bubbles += f'<div class="ds">{dt.strftime("%A %d %B %Y · %H:%M")}</div>'
+                prev_dt = dt
+            cls    = "me" if m["from_me"] else "th"
+            t_str  = dt.strftime("%H:%M") if dt else ""
+            bubbles += f"""
+            <div class="msg {cls}">
+              <div class="bbl">{h(m["text"])}</div>
+              <div class="mt">{t_str}</div>
+            </div>"""
+
+        panels += f"""
+        <div class="panel" id="{sid}">
+          <div class="ph">{h(name)}<span class="pc">{len(msgs)} messages</span></div>
+          <div class="msgs">{bubbles}</div>
+        </div>"""
+
+    total = sum(len(c["messages"]) for c in conversations.values())
+
+    return f"""<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<title>Messages iPhone</title>
+<style>
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{font-family:-apple-system,BlinkMacSystemFont,sans-serif;display:flex;height:100vh;background:#f5f5f5}}
+#sb{{width:300px;background:#fff;border-right:1px solid #e0e0e0;overflow-y:auto;flex-shrink:0}}
+#sbh{{padding:18px 16px 12px;border-bottom:1px solid #eee}}
+#sbh h1{{font-size:17px;font-weight:700}}
+#sbh p{{font-size:11px;color:#888;margin-top:3px}}
+#search{{width:calc(100% - 32px);margin:10px 16px;padding:7px 10px;border:1px solid #ddd;border-radius:8px;font-size:13px;outline:none}}
+.ci{{padding:11px 16px;border-bottom:1px solid #f0f0f0;cursor:pointer;transition:background .1s}}
+.ci:hover{{background:#f8f8f8}}
+.ci.active{{background:#007aff}}
+.ci.active .cn,.ci.active .cm,.ci.active .cp{{color:#fff}}
+.cn{{font-size:14px;font-weight:600;color:#111}}
+.cm{{font-size:11px;color:#888;margin-top:2px}}
+.cp{{font-size:12px;color:#aaa;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
+#main{{flex:1;display:flex;flex-direction:column;overflow:hidden}}
+.panel{{display:none;flex-direction:column;height:100%}}
+.panel.visible{{display:flex}}
+.ph{{padding:14px 20px;background:#fff;border-bottom:1px solid #e0e0e0;font-size:15px;font-weight:600;display:flex;align-items:center;gap:10px}}
+.pc{{font-size:12px;color:#888;font-weight:400}}
+.msgs{{flex:1;overflow-y:auto;padding:16px 20px;display:flex;flex-direction:column;gap:3px}}
+.ds{{text-align:center;font-size:11px;color:#888;margin:12px 0 4px;text-transform:capitalize}}
+.msg{{display:flex;flex-direction:column;max-width:72%}}
+.msg.me{{align-self:flex-end;align-items:flex-end}}
+.msg.th{{align-self:flex-start;align-items:flex-start}}
+.bbl{{padding:8px 13px;border-radius:18px;font-size:14px;line-height:1.45;white-space:pre-wrap;word-break:break-word}}
+.me .bbl{{background:#007aff;color:#fff;border-bottom-right-radius:4px}}
+.th .bbl{{background:#e5e5ea;color:#111;border-bottom-left-radius:4px}}
+.mt{{font-size:10px;color:#bbb;margin-top:2px;padding:0 4px}}
+#empty{{display:flex;align-items:center;justify-content:center;height:100%;color:#ccc;font-size:15px}}
+</style>
+</head>
+<body>
+<div id="sb">
+  <div id="sbh">
+    <h1>Messages iPhone</h1>
+    <p>{len(conversations)} conversations · {total} messages</p>
+  </div>
+  <input id="search" type="text" placeholder="Rechercher une conversation..." oninput="filter(this.value)">
+  <div id="list">{sidebar_items}</div>
+</div>
+<div id="main">
+  <div id="empty">← Sélectionne une conversation</div>
+  {panels}
+</div>
+<script>
+function show(id){{
+  document.querySelectorAll('.panel').forEach(p=>p.classList.remove('visible'));
+  document.querySelectorAll('.ci').forEach(i=>i.classList.remove('active'));
+  const p=document.getElementById(id);
+  const it=document.getElementById('i'+id);
+  if(p){{p.classList.add('visible');p.querySelector('.msgs').scrollTop=9e9;}}
+  if(it)it.classList.add('active');
+  document.getElementById('empty').style.display='none';
+}}
+function filter(q){{
+  q=q.toLowerCase();
+  document.querySelectorAll('.ci').forEach(el=>{{
+    el.style.display=el.querySelector('.cn').textContent.toLowerCase().includes(q)?'':'none';
+  }});
+}}
+</script>
+</body>
+</html>"""
+
+# ── CLI ───────────────────────────────────────────────────────────────────────
+
+def die(msg):
+    print(f"❌ {msg}")
+    sys.exit(1)
+
+def show_help():
+    print("""sms-export — Export iPhone messages from a local Finder backup to HTML
+
+USAGE
+  sms-export          Auto-detect backup and open in browser
+  sms-export --help   Show this help
+
+WHAT IT DOES
+  1. Finds your iPhone backup in ~/Library/Application Support/MobileSync/Backup/
+  2. Reads the SMS/iMessage SQLite database (no decryption needed if unencrypted)
+  3. Generates messages_iphone.html on your Desktop
+  4. Opens it in your browser — all conversations, searchable, with bubbles
+
+OUTPUT
+  ~/Desktop/messages_iphone.html
+
+REQUIREMENTS
+  - A local iPhone backup made via Finder (unencrypted)
+  - To create one: plug iPhone → open Finder → select iPhone → Back Up Now
+  - Make sure "Encrypt local backup" is NOT checked in Finder
+""")
+
+def main():
+    if "--help" in sys.argv or "-h" in sys.argv:
+        show_help()
+        sys.exit(0)
+
+    print("🔍 Recherche du backup iPhone...")
+    db_path = find_sms_db()
+    print("📖 Lecture des messages...")
+    conversations = load_conversations(db_path)
+
+    total = sum(len(c["messages"]) for c in conversations.values())
+    print(f"✅ {len(conversations)} conversations · {total} messages")
+    print("🎨 Génération du HTML...")
+
+    html   = generate_html(conversations)
+    output = Path.home() / "Desktop" / "messages_iphone.html"
+    output.write_text(html, encoding="utf-8")
+
+    print(f"✅ Exporté : {output}")
+    webbrowser.open(f"file://{output}")
+    subprocess.run(["afplay", "/System/Library/Sounds/Funk.aiff"], check=False)
+
+if __name__ == "__main__":
+    main()
