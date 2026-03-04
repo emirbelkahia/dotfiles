@@ -105,7 +105,7 @@ sms-export        # auto-detect backup, generate ~/Desktop/messages_iphone.html
 sms-export --help
 ```
 
-Output: `~/Desktop/messages_iphone.html` — two-pane UI with conversation list, search bar, and message bubbles.
+Output: `~/Documents/YYYY-Month-DD - Backup iMessage iPhone.html` (date read from the backup itself). Two-pane UI with sidebar, search bar, and message bubbles. Photos embedded inline, video/audio shown as badges.
 
 **Requirements:** a local (unencrypted) iPhone backup made via Finder. Plug iPhone → open Finder → select iPhone → *Back Up Now* (ensure "Encrypt local backup" is **not** checked).
 

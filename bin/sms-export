@@ -1,25 +1,37 @@
 #!/usr/bin/env python3
 """sms-export — Export iPhone messages from a local Finder backup to HTML"""
 
-import sqlite3
+import base64
+import hashlib
+import plistlib
 import shutil
-import sys
+import sqlite3
 import subprocess
+import sys
 import tempfile
 import webbrowser
 from datetime import datetime
 from pathlib import Path
 
-BACKUP_DIR = Path.home() / "Library/Application Support/MobileSync/Backup"
-SMS_HASH   = "3d0d7e5fb2ce288813306e4d4636395e047a3d28"
-APPLE_EPOCH = 978307200  # seconds between Unix epoch and Apple epoch (2001-01-01)
+BACKUP_DIR  = Path.home() / "Library/Application Support/MobileSync/Backup"
+SMS_HASH    = "3d0d7e5fb2ce288813306e4d4636395e047a3d28"
+APPLE_EPOCH = 978307200        # seconds between Unix epoch and Apple epoch (2001-01-01)
+IMG_MAX_BYTES = 3 * 1024 * 1024  # skip embedding images larger than 3 MB
+
+# ── ANSI colors (same palette as tc / wt) ─────────────────────────────────────
+
+B  = "\033[1m"
+Y  = "\033[33m"
+C  = "\033[36m"
+G  = "\033[90m"
+R  = "\033[0m"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def apple_ts(ts):
     if not ts:
         return None
-    if ts > 1_000_000_000_000:  # nanoseconds (iOS 11+)
+    if ts > 1_000_000_000_000:   # nanoseconds (iOS 11+)
         ts /= 1_000_000_000
     try:
         return datetime.fromtimestamp(ts + APPLE_EPOCH)
@@ -29,11 +41,51 @@ def apple_ts(ts):
 def h(s):
     if not s:
         return ""
-    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+    return (s.replace("&", "&amp;")
+             .replace("<", "&lt;")
+             .replace(">", "&gt;")
+             .replace('"', "&quot;"))
+
+def attachment_backup_path(backup_dir: Path, filename: str) -> Path | None:
+    """Resolve an attachment filename (~/Library/…) to its file in the backup."""
+    if not filename:
+        return None
+    # ~/Library/Messages/Attachments/… → MediaDomain-Library/Messages/Attachments/…
+    if filename.startswith("~/Library/"):
+        domain_path = "MediaDomain-" + filename[2:]
+    elif filename.startswith("/var/mobile/Library/"):
+        domain_path = "MediaDomain-" + filename[len("/var/mobile/"):]
+    else:
+        return None
+    file_hash = hashlib.sha1(domain_path.encode()).hexdigest()
+    candidate = backup_dir / file_hash[:2] / file_hash
+    return candidate if candidate.exists() else None
+
+def embed_attachment(backup_dir: Path, filename: str, mime_type: str) -> str:
+    """Return an HTML snippet for an attachment (inline image or badge)."""
+    mime = (mime_type or "").lower()
+
+    if mime.startswith("image/"):
+        path = attachment_backup_path(backup_dir, filename)
+        if path and path.stat().st_size <= IMG_MAX_BYTES:
+            data = base64.b64encode(path.read_bytes()).decode()
+            return f'<img class="att-img" src="data:{mime};base64,{data}" alt="image">'
+        return '<span class="att-badge">📷 Photo</span>'
+
+    if mime.startswith("video/"):
+        return '<span class="att-badge">🎥 Vidéo</span>'
+
+    if mime.startswith("audio/"):
+        return '<span class="att-badge">🎵 Audio</span>'
+
+    ext = Path(filename or "").suffix.lower()
+    label = Path(filename or "fichier").name
+    return f'<span class="att-badge">📎 {h(label)}</span>'
 
 # ── Backup detection ──────────────────────────────────────────────────────────
 
-def find_sms_db():
+def find_backup() -> tuple[Path, Path, datetime]:
+    """Return (sms_db_path, backup_dir, backup_date)."""
     if not BACKUP_DIR.exists():
         die("Aucun backup trouvé. Branchez votre iPhone et faites un backup via Finder.")
 
@@ -45,27 +97,39 @@ def find_sms_db():
             "    cliquez 'Sauvegarder maintenant' (sans chiffrement).")
 
     if len(backups) == 1:
-        return backups[0] / SMS_HASH
+        backup_dir = backups[0]
+    else:
+        print("Plusieurs backups trouvés :")
+        for i, b in enumerate(backups, 1):
+            print(f"  {i}. {b.name}")
+        choice = input("Lequel utiliser ? (numéro) : ").strip()
+        try:
+            backup_dir = backups[int(choice) - 1]
+        except (ValueError, IndexError):
+            die("Choix invalide.")
 
-    print("Plusieurs backups trouvés :")
-    for i, b in enumerate(backups, 1):
-        print(f"  {i}. {b.name}")
-    choice = input("Lequel utiliser ? (numéro) : ").strip()
-    try:
-        return backups[int(choice) - 1] / SMS_HASH
-    except (ValueError, IndexError):
-        die("Choix invalide.")
+    # Read backup date from Manifest.plist
+    backup_date = datetime.now()
+    manifest = backup_dir / "Manifest.plist"
+    if manifest.exists():
+        with open(manifest, "rb") as f:
+            info = plistlib.load(f)
+        backup_date = info.get("Date", backup_date)
+        if hasattr(backup_date, "replace"):         # already a datetime
+            backup_date = backup_date.replace(tzinfo=None)
+
+    return backup_dir / SMS_HASH, backup_dir, backup_date
 
 # ── Data loading ──────────────────────────────────────────────────────────────
 
-def load_conversations(db_path):
+def load_conversations(db_path: Path, backup_dir: Path) -> dict:
     tmp = Path(tempfile.mktemp(suffix=".db"))
     shutil.copy2(db_path, tmp)
 
     try:
         conn = sqlite3.connect(tmp)
         conn.row_factory = sqlite3.Row
-        cur = conn.cursor()
+        cur  = conn.cursor()
 
         # Smoke-test for encryption
         try:
@@ -74,7 +138,7 @@ def load_conversations(db_path):
             die("La base est chiffrée.\n"
                 "  → Refaites le backup dans Finder sans cocher 'Chiffrer le backup local'.")
 
-        # Handles (phone numbers / emails)
+        # Handles
         cur.execute("SELECT ROWID, id FROM handle")
         handles = {r["ROWID"]: r["id"] for r in cur.fetchall()}
 
@@ -83,21 +147,39 @@ def load_conversations(db_path):
         chats = {r["ROWID"]: {"id": r["chat_identifier"], "name": r["display_name"]}
                  for r in cur.fetchall()}
 
-        # Message → chat mapping
+        # Message → chat
         cur.execute("SELECT chat_id, message_id FROM chat_message_join")
         msg_to_chat = {r["message_id"]: r["chat_id"] for r in cur.fetchall()}
 
-        # Messages
+        # Attachments per message
+        attachments_by_msg: dict[int, list] = {}
+        try:
+            cur.execute("""
+                SELECT maj.message_id, a.filename, a.mime_type
+                FROM message_attachment_join maj
+                JOIN attachment a ON a.ROWID = maj.attachment_id
+            """)
+            for row in cur.fetchall():
+                mid = row["message_id"]
+                attachments_by_msg.setdefault(mid, []).append({
+                    "filename":  row["filename"] or "",
+                    "mime_type": row["mime_type"] or "",
+                })
+        except sqlite3.OperationalError:
+            pass  # table absent in some older backups
+
+        # Messages (including attachment-only, so no text filter here)
         cur.execute("""
             SELECT ROWID, text, date, is_from_me, handle_id, service
             FROM message
             ORDER BY date ASC
         """)
 
-        conversations = {}
+        conversations: dict = {}
         for row in cur.fetchall():
-            text = (row["text"] or "").strip()
-            if not text:
+            text  = (row["text"] or "").strip()
+            atts  = attachments_by_msg.get(row["ROWID"], [])
+            if not text and not atts:
                 continue
 
             chat_id = msg_to_chat.get(row["ROWID"])
@@ -117,6 +199,7 @@ def load_conversations(db_path):
                 "date":     apple_ts(row["date"]),
                 "from_me":  bool(row["is_from_me"]),
                 "service":  row["service"] or "",
+                "atts":     atts,
             })
 
         conn.close()
@@ -127,12 +210,12 @@ def load_conversations(db_path):
 
 # ── HTML generation ───────────────────────────────────────────────────────────
 
-def generate_html(conversations):
+def generate_html(conversations: dict, backup_dir: Path, backup_date: datetime) -> str:
     sorted_convos = sorted(
         conversations.items(),
         key=lambda x: max(
             (m["date"] for m in x[1]["messages"] if m["date"]),
-            default=datetime.min
+            default=datetime.min,
         ),
         reverse=True,
     )
@@ -141,11 +224,11 @@ def generate_html(conversations):
     panels        = ""
 
     for i, (key, convo) in enumerate(sorted_convos):
-        name = convo["name"] or key
-        msgs = convo["messages"]
-        last = next((m for m in reversed(msgs) if m["date"]), None)
+        name      = convo["name"] or key
+        msgs      = convo["messages"]
+        last      = next((m for m in reversed(msgs) if m["date"]), None)
         last_date = last["date"].strftime("%d/%m/%Y") if last else ""
-        preview   = next((m["text"][:60] for m in reversed(msgs)), "")
+        preview   = next((m["text"][:60] for m in reversed(msgs) if m["text"]), "📎 Pièce jointe")
         sid       = f"c{i}"
 
         sidebar_items += f"""
@@ -155,18 +238,26 @@ def generate_html(conversations):
           <div class="cp">{h(preview)}</div>
         </div>"""
 
-        bubbles  = ""
-        prev_dt  = None
+        bubbles = ""
+        prev_dt = None
         for m in msgs:
             dt = m["date"]
             if dt and (prev_dt is None or (dt - prev_dt).total_seconds() > 3600):
                 bubbles += f'<div class="ds">{dt.strftime("%A %d %B %Y · %H:%M")}</div>'
                 prev_dt = dt
-            cls    = "me" if m["from_me"] else "th"
-            t_str  = dt.strftime("%H:%M") if dt else ""
+
+            cls   = "me" if m["from_me"] else "th"
+            t_str = dt.strftime("%H:%M") if dt else ""
+
+            content = ""
+            if m["text"]:
+                content += f'<div class="bbl">{h(m["text"])}</div>'
+            for att in m["atts"]:
+                content += f'<div class="bbl att">{embed_attachment(backup_dir, att["filename"], att["mime_type"])}</div>'
+
             bubbles += f"""
             <div class="msg {cls}">
-              <div class="bbl">{h(m["text"])}</div>
+              {content}
               <div class="mt">{t_str}</div>
             </div>"""
 
@@ -176,13 +267,15 @@ def generate_html(conversations):
           <div class="msgs">{bubbles}</div>
         </div>"""
 
-    total = sum(len(c["messages"]) for c in conversations.values())
+    total      = sum(len(c["messages"]) for c in conversations.values())
+    export_dt  = datetime.now().strftime("%d/%m/%Y %H:%M")
+    backup_str = backup_date.strftime("%d/%m/%Y %H:%M")
 
     return f"""<!DOCTYPE html>
 <html lang="fr">
 <head>
 <meta charset="UTF-8">
-<title>Messages iPhone</title>
+<title>Messages iPhone — {backup_date.strftime('%Y-%B-%d')}</title>
 <style>
 *{{box-sizing:border-box;margin:0;padding:0}}
 body{{font-family:-apple-system,BlinkMacSystemFont,sans-serif;display:flex;height:100vh;background:#f5f5f5}}
@@ -211,8 +304,13 @@ body{{font-family:-apple-system,BlinkMacSystemFont,sans-serif;display:flex;heigh
 .bbl{{padding:8px 13px;border-radius:18px;font-size:14px;line-height:1.45;white-space:pre-wrap;word-break:break-word}}
 .me .bbl{{background:#007aff;color:#fff;border-bottom-right-radius:4px}}
 .th .bbl{{background:#e5e5ea;color:#111;border-bottom-left-radius:4px}}
+.bbl.att{{padding:4px;background:transparent!important}}
+.att-img{{max-width:260px;max-height:320px;border-radius:14px;display:block}}
+.att-badge{{display:inline-block;padding:6px 12px;border-radius:14px;font-size:13px;background:#e5e5ea;color:#555}}
+.me .att-badge{{background:#005ecb;color:#fff}}
 .mt{{font-size:10px;color:#bbb;margin-top:2px;padding:0 4px}}
 #empty{{display:flex;align-items:center;justify-content:center;height:100%;color:#ccc;font-size:15px}}
+#footer{{font-size:10px;color:#bbb;padding:6px 20px;border-top:1px solid #eee;background:#fafafa;text-align:right}}
 </style>
 </head>
 <body>
@@ -227,6 +325,7 @@ body{{font-family:-apple-system,BlinkMacSystemFont,sans-serif;display:flex;heigh
 <div id="main">
   <div id="empty">← Sélectionne une conversation</div>
   {panels}
+  <div id="footer">Backup du {backup_str} · Exporté le {export_dt}</div>
 </div>
 <script>
 function show(id){{
@@ -250,30 +349,40 @@ function filter(q){{
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
-def die(msg):
+def die(msg: str):
     print(f"❌ {msg}")
     sys.exit(1)
 
 def show_help():
-    print("""sms-export — Export iPhone messages from a local Finder backup to HTML
+    print(f"""
+{B}sms-export{R} — Export iPhone messages from a local Finder backup to HTML
 
-USAGE
-  sms-export          Auto-detect backup and open in browser
-  sms-export --help   Show this help
+{B}{Y}USAGE{R}
+  {C}sms-export{R}          Auto-detect backup and open in browser
+  {C}sms-export --help{R}   Show this help
 
-WHAT IT DOES
-  1. Finds your iPhone backup in ~/Library/Application Support/MobileSync/Backup/
-  2. Reads the SMS/iMessage SQLite database (no decryption needed if unencrypted)
-  3. Generates messages_iphone.html on your Desktop
-  4. Opens it in your browser — all conversations, searchable, with bubbles
+{B}{Y}WHAT IT DOES{R}
+  1. Finds your iPhone backup in {C}~/Library/Application Support/MobileSync/Backup/{R}
+  2. Reads the SMS/iMessage SQLite database {G}(no decryption needed if unencrypted){R}
+  3. Extracts text messages, iMessages, and attachments {G}(photos inline, badges for video/audio){R}
+  4. Generates a standalone HTML file in {C}~/Documents/{R}
+  5. Opens it in your browser — all conversations, searchable, with bubbles
 
-OUTPUT
-  ~/Desktop/messages_iphone.html
+{B}{Y}OUTPUT{R}
+  {C}~/Documents/YYYY-Month-DD - Backup iMessage iPhone.html{R}  {G}← date from the backup itself{R}
 
-REQUIREMENTS
-  - A local iPhone backup made via Finder (unencrypted)
-  - To create one: plug iPhone → open Finder → select iPhone → Back Up Now
-  - Make sure "Encrypt local backup" is NOT checked in Finder
+{B}{Y}ATTACHMENTS{R}
+  {C}Photos{R}    Embedded inline as base64 {G}(skipped if > 3 MB){R}
+  {C}Video{R}     Badge placeholder {G}🎥 Vidéo{R}
+  {C}Audio{R}     Badge placeholder {G}🎵 Audio{R}
+  {C}Other{R}     Badge with filename
+
+{B}{Y}REQUIREMENTS{R}
+  {C}Python 3{R}  {G}standard library only, no pip install needed{R}
+
+{B}{Y}SETUP{R}  {G}(new machine — one time){R}
+  {G}# Plug iPhone → open Finder → select iPhone → Back Up Now{R}
+  {G}# Make sure "Encrypt local backup" is NOT checked{R}
 """)
 
 def main():
@@ -282,16 +391,20 @@ def main():
         sys.exit(0)
 
     print("🔍 Recherche du backup iPhone...")
-    db_path = find_sms_db()
+    db_path, backup_dir, backup_date = find_backup()
+
+    print(f"📅 Backup du {backup_date.strftime('%d/%m/%Y %H:%M')}")
     print("📖 Lecture des messages...")
-    conversations = load_conversations(db_path)
+    conversations = load_conversations(db_path, backup_dir)
 
     total = sum(len(c["messages"]) for c in conversations.values())
     print(f"✅ {len(conversations)} conversations · {total} messages")
     print("🎨 Génération du HTML...")
 
-    html   = generate_html(conversations)
-    output = Path.home() / "Desktop" / "messages_iphone.html"
+    html       = generate_html(conversations, backup_dir, backup_date)
+    month_name = backup_date.strftime("%B")   # March, Avril…
+    filename   = f"{backup_date.strftime('%Y')}-{month_name}-{backup_date.strftime('%d')} - Backup iMessage iPhone.html"
+    output     = Path.home() / "Documents" / filename
     output.write_text(html, encoding="utf-8")
 
     print(f"✅ Exporté : {output}")
