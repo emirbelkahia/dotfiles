@@ -6,7 +6,7 @@ All notable changes to this repository are documented in this file.
 
 ### Added
 
-- `bin/sms-export` — exports iPhone messages from a local Finder backup to a standalone HTML file. Auto-detects the SMS SQLite database in `~/Library/Application Support/MobileSync/Backup/`, reads all iMessage/SMS conversations including attachments (photos embedded inline as base64, video/audio/other as labelled badges). Output saved to `~/Documents/YYYY-Month-DD - Backup iMessage iPhone.html` (date read from `Manifest.plist`). Two-pane UI with sidebar, search bar, and message bubbles. Colored `--help`. No iCloud, no paid tools, no pip dependencies.
+- `bin/sms-export` — exports iPhone messages from a local Finder backup to HTML. Auto-detects the SMS SQLite database, reads all iMessage/SMS conversations and attachments. Output: `~/Documents/YYYY-Month-DD - Backup iMessage iPhone.html` + a sibling `~/Documents/YYYY-Month-DD - Backup iMessage iPhone/` folder containing all attachment files (photos, videos, audio, other). HTML references attachments via relative paths — no base64 embedding. Images displayed inline via `<img>`, video/audio playable via native HTML5 tags, other files as download links. If several backups exist, lists them by device name and date (read from `Info.plist`) and prompts to choose. Colored `--help`. No iCloud, no paid tools, no pip dependencies.
 
 ## 2026-03-04
 

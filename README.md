@@ -105,7 +105,13 @@ sms-export        # auto-detect backup, generate ~/Desktop/messages_iphone.html
 sms-export --help
 ```
 
-Output: `~/Documents/YYYY-Month-DD - Backup iMessage iPhone.html` (date read from the backup itself). Two-pane UI with sidebar, search bar, and message bubbles. Photos embedded inline, video/audio shown as badges.
+Output:
+- `~/Documents/YYYY-Month-DD - Backup iMessage iPhone.html` — HTML viewer (date from the backup)
+- `~/Documents/YYYY-Month-DD - Backup iMessage iPhone/` — attachments folder (photos, videos, audio, other files)
+
+The HTML references attachments via relative paths — no base64 embedding. Images shown inline, video/audio playable via native HTML5 tags, other files as download links. If a file is missing from the backup, a badge is shown instead.
+
+If several backups are found, the script lists them by device name and date and asks which one to use.
 
 **Requirements:** a local (unencrypted) iPhone backup made via Finder. Plug iPhone → open Finder → select iPhone → *Back Up Now* (ensure "Encrypt local backup" is **not** checked).
 
