@@ -1,8 +1,18 @@
 #!/usr/bin/env python3
 """sms-export — Export iPhone messages from a local Finder backup to HTML"""
 
+# Auto-switch to the dedicated venv (set up by install.sh) so that
+# iphone-backup-decrypt is available without any manual activation.
+import os, sys
+_VENV_DIR = os.path.expanduser("~/.venv/sms-export")
+if os.path.exists(_VENV_DIR) and sys.prefix != _VENV_DIR:
+    _VENV_PY = os.path.join(_VENV_DIR, "bin", "python3")
+    os.execv(_VENV_PY, [_VENV_PY] + sys.argv)
+
+import getpass
 import hashlib
 import plistlib
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -26,6 +36,10 @@ R  = "\033[0m"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+def _bar(current: int, total: int, width: int = 28) -> str:
+    filled = int(width * current / total) if total else width
+    return "█" * filled + "░" * (width - filled)
+
 def apple_ts(ts):
     if not ts:
         return None
@@ -44,67 +58,174 @@ def h(s):
              .replace(">", "&gt;")
              .replace('"', "&quot;"))
 
-def attachment_backup_path(backup_dir: Path, filename: str) -> Path | None:
-    """Resolve an attachment filename (~/Library/… or /var/mobile/…) to its backup file."""
-    if not filename:
-        return None
-    if filename.startswith("~/Library/"):
-        domain_path = "MediaDomain-" + filename[2:]
-    elif filename.startswith("/var/mobile/Library/"):
-        domain_path = "MediaDomain-" + filename[len("/var/mobile/"):]
+def iphone_rel_path(filename: str) -> str | None:
+    """Convert an attachment filename to an iPhone-relative path for iphone-backup-decrypt."""
+    if filename.startswith("~/"):
+        return filename[2:]                          # ~/Library/… → Library/…
+    if filename.startswith("/var/mobile/"):
+        return filename[len("/var/mobile/"):]        # /var/mobile/Library/… → Library/…
+    return None
+
+def attachment_backup_hash(filename: str) -> str | None:
+    """Compute the SHA-1 backup hash for an attachment (unencrypted backups)."""
+    if filename.startswith("~/"):
+        rel    = filename[2:]           # ~/Library/… → Library/…
+        domain = "HomeDomain"
+    elif filename.startswith("/var/mobile/Media/"):
+        rel    = filename[len("/var/mobile/Media/"):]
+        domain = "MediaDomain"
+    elif filename.startswith("/var/mobile/"):
+        rel    = filename[len("/var/mobile/"):]
+        domain = "HomeDomain"
     else:
         return None
-    file_hash = hashlib.sha1(domain_path.encode()).hexdigest()
-    candidate = backup_dir / file_hash[:2] / file_hash
-    return candidate if candidate.exists() else None
+    return hashlib.sha1(f"{domain}-{rel}".encode()).hexdigest()
 
-def export_attachment(src: Path, orig_name: str, atts_dir: Path, used: set) -> str:
-    """Copy attachment to atts_dir with a unique name; return the output filename."""
-    stem, ext = Path(orig_name).stem, Path(orig_name).suffix
-    out = orig_name
-    n   = 1
-    while out in used:
-        out = f"{stem}_{n}{ext}"
-        n  += 1
-    used.add(out)
-    shutil.copy2(src, atts_dir / out)
-    return out
+# ── Contacts ─────────────────────────────────────────────────────────────────
 
-def render_attachment(backup_dir: Path, filename: str, mime_type: str,
+def load_contacts(backup_dir: Path, enc_backup) -> dict:
+    """Return {normalized_key -> display_name} from AddressBook.sqlitedb."""
+    ab_hash = hashlib.sha1(b"HomeDomain-Library/AddressBook/AddressBook.sqlitedb").hexdigest()
+    tmp = Path(tempfile.mktemp(suffix=".db"))
+    try:
+        if enc_backup is not None:
+            try:
+                enc_backup.extract_file(
+                    relative_path="Library/AddressBook/AddressBook.sqlitedb",
+                    output_filename=str(tmp),
+                )
+            except Exception:
+                return {}
+        else:
+            src = backup_dir / ab_hash[:2] / ab_hash
+            if not src.exists():
+                return {}
+            shutil.copy2(src, tmp)
+
+        conn = sqlite3.connect(tmp)
+        conn.row_factory = sqlite3.Row
+        cur  = conn.cursor()
+
+        cur.execute("SELECT ROWID, First, Last, Organization FROM ABPerson")
+        persons = {}
+        for row in cur.fetchall():
+            name = f"{row['First'] or ''} {row['Last'] or ''}".strip() or (row["Organization"] or "")
+            if name:
+                persons[row["ROWID"]] = name
+
+        # property 3 = phone, 4 = email
+        cur.execute("""
+            SELECT record_id, property, value
+            FROM ABMultiValue
+            WHERE property IN (3, 4) AND value IS NOT NULL
+        """)
+        contacts: dict = {}
+        for row in cur.fetchall():
+            pid = row["record_id"]
+            if pid not in persons:
+                continue
+            val = (row["value"] or "").strip()
+            if row["property"] == 3:  # phone — match on last 9 digits
+                key = re.sub(r"\D", "", val)[-9:]
+                if key:
+                    contacts[key] = persons[pid]
+            else:  # email
+                contacts[val.lower()] = persons[pid]
+
+        conn.close()
+        return contacts
+
+    except Exception:
+        return {}
+    finally:
+        tmp.unlink(missing_ok=True)
+
+def resolve_name(handle: str, contacts: dict) -> str:
+    """Resolve a phone number or email to a contact display name."""
+    if not handle:
+        return handle
+    if "@" in handle:
+        return contacts.get(handle.lower(), handle)
+    digits = re.sub(r"\D", "", handle)[-9:]
+    return contacts.get(digits, handle)
+
+# ── Attachment rendering ───────────────────────────────────────────────────────
+
+def export_attachment(filename: str, mime_type: str,
+                      backup_dir: Path, enc_backup,
                       atts_dir: Path, atts_name: str, used: set) -> str:
-    """Return an HTML snippet for an attachment, exporting the file to atts_dir."""
+    """
+    Copy/decrypt an attachment to atts_dir and return its HTML snippet.
+    enc_backup is an EncryptedBackup instance or None for unencrypted backups.
+    """
     mime      = (mime_type or "").lower()
     orig_name = Path(filename or "attachment").name
-    src       = attachment_backup_path(backup_dir, filename)
 
-    if src is None:
-        return f'<span class="att-badge">📎 {h(orig_name)} <em>(introuvable dans le backup)</em></span>'
+    # Plugin payloads (stickers, link previews, Apple Pay…) are binary blobs
+    # with no displayable content — skip them silently.
+    if orig_name.endswith(".pluginPayloadAttachment"):
+        return ""
 
-    out      = export_attachment(src, orig_name, atts_dir, used)
-    rel_path = f"{atts_name}/{out}"
+    # ── resolve output filename (handle duplicates) ───────────────────────────
+    stem, ext = Path(orig_name).stem, Path(orig_name).suffix
+    out_name  = orig_name
+    n = 1
+    while out_name in used:
+        out_name = f"{stem}_{n}{ext}"
+        n += 1
+    used.add(out_name)
+    dest = atts_dir / out_name
+    rel  = f"{atts_name}/{out_name}"
 
+    # ── copy/decrypt the file ─────────────────────────────────────────────────
+    found = False
+    if enc_backup is not None:
+        rel_path = iphone_rel_path(filename)
+        if rel_path:
+            try:
+                enc_backup.extract_file(relative_path=rel_path, output_filename=str(dest))
+                found = dest.exists()
+            except Exception:
+                found = False
+    else:
+        file_hash = attachment_backup_hash(filename)
+        if file_hash:
+            src = backup_dir / file_hash[:2] / file_hash
+            if src.exists():
+                shutil.copy2(src, dest)
+                found = True
+
+    if not found:
+        return f'<span class="att-badge">📎 {h(orig_name)} <em>(not found in backup)</em></span>'
+
+    # ── render ────────────────────────────────────────────────────────────────
     if mime.startswith("image/"):
-        return f'<img class="att-img" src="{rel_path}" alt="{h(orig_name)}">'
+        return f'<img class="att-img" src="{rel}" alt="{h(orig_name)}">'
     if mime.startswith("video/"):
-        return (f'<video class="att-video" controls src="{rel_path}">'
-                f'<a href="{rel_path}">🎥 {h(orig_name)}</a></video>')
+        return (f'<video class="att-video" controls src="{rel}">'
+                f'<a href="{rel}">🎥 {h(orig_name)}</a></video>')
     if mime.startswith("audio/"):
-        return f'<audio class="att-audio" controls src="{rel_path}"></audio>'
-    return f'<a class="att-link" href="{rel_path}">📎 {h(orig_name)}</a>'
+        return f'<audio class="att-audio" controls src="{rel}"></audio>'
+    return f'<a class="att-link" href="{rel}">📎 {h(orig_name)}</a>'
 
 # ── Backup detection ──────────────────────────────────────────────────────────
 
-def find_backup() -> tuple[Path, Path, datetime]:
-    """Return (sms_db_path, backup_dir, backup_date)."""
+def find_backup() -> tuple[Path, Path, datetime, bool]:
+    """Return (sms_db_path, backup_dir, backup_date, is_encrypted)."""
     if not BACKUP_DIR.exists():
-        die("Aucun backup trouvé. Branchez votre iPhone et faites un backup via Finder.")
+        die("No backup found. Plug your iPhone and create a backup via Finder.")
 
-    backups = [d for d in BACKUP_DIR.iterdir() if d.is_dir() and (d / SMS_HASH).exists()]
+    try:
+        backups = [d for d in BACKUP_DIR.iterdir() if d.is_dir() and (d / SMS_HASH[:2] / SMS_HASH).exists()]
+    except PermissionError:
+        die("Permission denied: ~/Library/Application Support/MobileSync/Backup\n"
+            "  → System Settings → Privacy & Security → Full Disk Access\n"
+            "  → Add your terminal (Terminal, iTerm2, Warp…) and relaunch it.")
 
     if not backups:
-        die("Aucune base SMS trouvée.\n"
-            "  → Branchez l'iPhone, ouvrez Finder, sélectionnez l'iPhone,\n"
-            "    cliquez 'Sauvegarder maintenant' (sans chiffrement).")
+        die("No SMS database found.\n"
+            "  → Plug your iPhone, open Finder, select your iPhone,\n"
+            "    click 'Back Up Now'.")
 
     def backup_label(d: Path) -> str:
         info_path = d / "Info.plist"
@@ -113,41 +234,73 @@ def find_backup() -> tuple[Path, Path, datetime]:
                 info = plistlib.load(f)
             device = info.get("Device Name") or info.get("Display Name") or d.name
             date   = info.get("Last Backup Date")
-            date_s = date.strftime("%d/%m/%Y %H:%M") if date else "date inconnue"
+            date_s = date.strftime("%Y-%m-%d %H:%M") if date else "unknown date"
             return f"{device}  {G}({date_s}){R}"
         return d.name
 
     if len(backups) == 1:
         backup_dir = backups[0]
     else:
-        print("Plusieurs backups trouvés :")
+        print("Multiple backups found:")
         for i, b in enumerate(backups, 1):
             print(f"  {i}. {backup_label(b)}")
-        choice = input("Lequel utiliser ? (numéro) : ").strip()
+        choice = input("Which one? (number): ").strip()
         try:
             backup_dir = backups[int(choice) - 1]
         except (ValueError, IndexError):
-            die("Choix invalide.")
+            die("Invalid choice.")
 
-    # Read backup date from Manifest.plist
-    backup_date = datetime.now()
-    manifest    = backup_dir / "Manifest.plist"
+    # Read backup date and encryption flag from Manifest.plist
+    backup_date  = datetime.now()
+    is_encrypted = False
+    manifest     = backup_dir / "Manifest.plist"
     if manifest.exists():
         with open(manifest, "rb") as f:
             info = plistlib.load(f)
-        backup_date = info.get("Date", backup_date)
+        backup_date  = info.get("Date", backup_date)
+        is_encrypted = bool(info.get("IsEncrypted", False))
         if hasattr(backup_date, "replace"):
             backup_date = backup_date.replace(tzinfo=None)
 
-    return backup_dir / SMS_HASH, backup_dir, backup_date
+    return backup_dir / SMS_HASH[:2] / SMS_HASH, backup_dir, backup_date, is_encrypted
+
+# ── Encrypted backup setup ────────────────────────────────────────────────────
+
+def open_encrypted_backup(backup_dir: Path):
+    """Prompt for password and return an EncryptedBackup instance."""
+    try:
+        from iphone_backup_decrypt import EncryptedBackup
+    except ImportError:
+        die("Encrypted backup detected but iphone-backup-decrypt is not installed.\n"
+            "  → Run install.sh to set up the required venv:\n"
+            "    cd ~/dotfiles && ./install.sh")
+
+    password = getpass.getpass("🔑 Backup password: ")
+    try:
+        enc = EncryptedBackup(backup_directory=str(backup_dir), passphrase=password)
+        return enc
+    except Exception as e:
+        die(f"Failed to unlock backup (wrong password?)\n  {e}")
 
 # ── Data loading ──────────────────────────────────────────────────────────────
 
-def load_conversations(db_path: Path) -> dict:
+def load_conversations(db_path: Path, enc_backup, contacts: dict | None = None) -> dict:
+    """
+    Load all conversations from the SMS database.
+    enc_backup is an EncryptedBackup instance or None.
+    contacts is the {normalized_key: display_name} dict from load_contacts().
+    """
     tmp = Path(tempfile.mktemp(suffix=".db"))
-    shutil.copy2(db_path, tmp)
 
     try:
+        if enc_backup is not None:
+            enc_backup.extract_file(
+                relative_path="Library/SMS/sms.db",
+                output_filename=str(tmp),
+            )
+        else:
+            shutil.copy2(db_path, tmp)
+
         conn = sqlite3.connect(tmp)
         conn.row_factory = sqlite3.Row
         cur  = conn.cursor()
@@ -155,8 +308,9 @@ def load_conversations(db_path: Path) -> dict:
         try:
             cur.execute("SELECT count(*) FROM message")
         except sqlite3.DatabaseError:
-            die("La base est chiffrée.\n"
-                "  → Refaites le backup dans Finder sans cocher 'Chiffrer le backup local'.")
+            die("Database is encrypted.\n"
+                "  → Redo the backup in Finder without checking 'Encrypt local backup',\n"
+                "    or re-run sms-export with the correct password.")
 
         cur.execute("SELECT ROWID, id FROM handle")
         handles = {r["ROWID"]: r["id"] for r in cur.fetchall()}
@@ -188,8 +342,13 @@ def load_conversations(db_path: Path) -> dict:
             FROM message ORDER BY date ASC
         """)
 
+        rows = cur.fetchall()
+        total_rows = len(rows)
         conversations: dict = {}
-        for row in cur.fetchall():
+        for idx, row in enumerate(rows, 1):
+            if idx % 200 == 0 or idx == total_rows:
+                print(f"\r  [{_bar(idx, total_rows)}] {idx}/{total_rows} messages", end="", flush=True)
+
             text = (row["text"] or "").strip()
             atts = attachments_by_msg.get(row["ROWID"], [])
             if not text and not atts:
@@ -199,10 +358,10 @@ def load_conversations(db_path: Path) -> dict:
             if chat_id and chat_id in chats:
                 info = chats[chat_id]
                 key  = info["id"]
-                name = info["name"] or info["id"]
+                name = info["name"] or (resolve_name(key, contacts) if contacts else key)
             else:
-                key  = handles.get(row["handle_id"], "Inconnu")
-                name = key
+                key  = handles.get(row["handle_id"], "Unknown")
+                name = resolve_name(key, contacts) if contacts else key
 
             conversations.setdefault(key, {"name": name, "messages": []})
             conversations[key]["messages"].append({
@@ -211,6 +370,8 @@ def load_conversations(db_path: Path) -> dict:
                 "from_me": bool(row["is_from_me"]),
                 "atts":    atts,
             })
+        if total_rows:
+            print()  # clear the \r line
 
         conn.close()
         return conversations
@@ -220,8 +381,8 @@ def load_conversations(db_path: Path) -> dict:
 
 # ── HTML generation ───────────────────────────────────────────────────────────
 
-def generate_html(conversations: dict, backup_dir: Path, backup_date: datetime,
-                  atts_dir: Path, atts_name: str) -> str:
+def generate_html(conversations: dict, backup_dir: Path, enc_backup,
+                  backup_date: datetime, atts_dir: Path, atts_name: str) -> str:
 
     sorted_convos = sorted(
         conversations.items(),
@@ -235,13 +396,15 @@ def generate_html(conversations: dict, backup_dir: Path, backup_date: datetime,
     used_names: set = set()
     sidebar_items   = ""
     panels          = ""
+    n_convos        = len(sorted_convos)
 
     for i, (key, convo) in enumerate(sorted_convos):
+        print(f"\r  [{_bar(i + 1, n_convos)}] {i + 1}/{n_convos} conversations", end="", flush=True)
         name      = convo["name"] or key
         msgs      = convo["messages"]
         last      = next((m for m in reversed(msgs) if m["date"]), None)
-        last_date = last["date"].strftime("%d/%m/%Y") if last else ""
-        preview   = next((m["text"][:60] for m in reversed(msgs) if m["text"]), "📎 Pièce jointe")
+        last_date = last["date"].strftime("%Y-%m-%d") if last else ""
+        preview   = next((m["text"][:60] for m in reversed(msgs) if m["text"]), "📎 Attachment")
         sid       = f"c{i}"
 
         sidebar_items += f"""
@@ -256,7 +419,7 @@ def generate_html(conversations: dict, backup_dir: Path, backup_date: datetime,
         for m in msgs:
             dt = m["date"]
             if dt and (prev_dt is None or (dt - prev_dt).total_seconds() > 3600):
-                bubbles += f'<div class="ds">{dt.strftime("%A %d %B %Y · %H:%M")}</div>'
+                bubbles += f'<div class="ds">{dt.strftime("%A %B %d, %Y · %H:%M")}</div>'
                 prev_dt = dt
 
             cls   = "me" if m["from_me"] else "th"
@@ -266,8 +429,9 @@ def generate_html(conversations: dict, backup_dir: Path, backup_date: datetime,
             if m["text"]:
                 content += f'<div class="bbl">{h(m["text"])}</div>'
             for att in m["atts"]:
-                snippet = render_attachment(
-                    backup_dir, att["filename"], att["mime_type"],
+                snippet = export_attachment(
+                    att["filename"], att["mime_type"],
+                    backup_dir, enc_backup,
                     atts_dir, atts_name, used_names,
                 )
                 content += f'<div class="bbl att">{snippet}</div>'
@@ -284,22 +448,31 @@ def generate_html(conversations: dict, backup_dir: Path, backup_date: datetime,
           <div class="msgs">{bubbles}</div>
         </div>"""
 
+    print()  # clear progress line
+
     total      = sum(len(c["messages"]) for c in conversations.values())
-    export_dt  = datetime.now().strftime("%d/%m/%Y %H:%M")
-    backup_str = backup_date.strftime("%d/%m/%Y %H:%M")
+    export_dt  = datetime.now().strftime("%Y-%m-%d %H:%M")
+    backup_str = backup_date.strftime("%Y-%m-%d %H:%M")
+
+    all_dates  = [m["date"] for c in conversations.values() for m in c["messages"] if m["date"]]
+    date_from  = min(all_dates).strftime("%b %-d, %Y") if all_dates else "unknown"
+    date_to    = max(all_dates).strftime("%b %-d, %Y") if all_dates else "unknown"
 
     return f"""<!DOCTYPE html>
-<html lang="fr">
+<html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Messages iPhone — {backup_date.strftime('%Y-%B-%d')}</title>
+<title>iPhone Messages — {backup_date.strftime('%Y-%B-%d')}</title>
 <style>
 *{{box-sizing:border-box;margin:0;padding:0}}
 body{{font-family:-apple-system,BlinkMacSystemFont,sans-serif;display:flex;height:100vh;background:#f5f5f5}}
 #sb{{width:300px;background:#fff;border-right:1px solid #e0e0e0;overflow-y:auto;flex-shrink:0}}
-#sbh{{padding:18px 16px 12px;border-bottom:1px solid #eee}}
+#sbh{{padding:16px 16px 12px;border-bottom:1px solid #eee}}
 #sbh h1{{font-size:17px;font-weight:700}}
-#sbh p{{font-size:11px;color:#888;margin-top:3px}}
+#sbh .dr{{font-size:13px;font-weight:600;color:#007aff;margin-top:5px}}
+#sbh .meta{{font-size:11px;color:#888;margin-top:3px}}
+#sbh .gen{{font-size:10px;color:#bbb;margin-top:6px;padding-top:6px;border-top:1px solid #f0f0f0}}
+#sbh .gen a{{color:#bbb;text-decoration:underline dotted;cursor:pointer}}
 #search{{width:calc(100% - 32px);margin:10px 16px;padding:7px 10px;border:1px solid #ddd;border-radius:8px;font-size:13px;outline:none}}
 .ci{{padding:11px 16px;border-bottom:1px solid #f0f0f0;cursor:pointer;transition:background .1s}}
 .ci:hover{{background:#f8f8f8}}
@@ -328,39 +501,78 @@ body{{font-family:-apple-system,BlinkMacSystemFont,sans-serif;display:flex;heigh
 .att-link{{display:inline-block;padding:6px 12px;border-radius:14px;font-size:13px;background:#e5e5ea;color:#333;text-decoration:none}}
 .me .att-link{{background:#005ecb;color:#fff}}
 .att-badge{{display:inline-block;padding:6px 12px;border-radius:14px;font-size:13px;background:#e5e5ea;color:#888}}
+.bbl.match{{outline:2px solid #ffd60a;outline-offset:2px}}
 .mt{{font-size:10px;color:#bbb;margin-top:2px;padding:0 4px}}
 #empty{{display:flex;align-items:center;justify-content:center;height:100%;color:#ccc;font-size:15px}}
-#footer{{font-size:10px;color:#bbb;padding:6px 20px;border-top:1px solid #eee;background:#fafafa;text-align:right;flex-shrink:0}}
 </style>
 </head>
 <body>
 <div id="sb">
   <div id="sbh">
-    <h1>Messages iPhone</h1>
-    <p>{len(conversations)} conversations · {total} messages</p>
+    <h1>iPhone Messages</h1>
+    <div class="dr">📅 {date_from} → {date_to}</div>
+    <div class="meta">{len(conversations)} conversations · {total} messages</div>
+    <div class="gen">Generated by <a href="https://github.com/emirbelkahia/dotfiles" target="_blank" title="sms-export — custom CLI tool by Emir Belkahia&#10;Part of github.com/emirbelkahia/dotfiles&#10;Hover to see repo · click to open">sms-export</a> · backup {backup_str} · exported {export_dt}</div>
   </div>
-  <input id="search" type="text" placeholder="Rechercher une conversation..." oninput="filter(this.value)">
+  <input id="search" type="text" placeholder="Search conversations..." oninput="filter(this.value)">
   <div id="list">{sidebar_items}</div>
 </div>
 <div id="main">
-  <div id="empty">← Sélectionne une conversation</div>
+  <div id="empty">← Select a conversation</div>
   {panels}
-  <div id="footer">Backup du {backup_str} · Exporté le {export_dt}</div>
 </div>
 <script>
+// Cache original sidebar previews so filter can restore them
+document.querySelectorAll('.cp').forEach(e=>e.dataset.preview=e.textContent);
 function show(id){{
-  document.querySelectorAll('.panel').forEach(p=>p.classList.remove('visible'));
+  // Clear previous highlights and active state
+  document.querySelectorAll('.panel').forEach(p=>{{
+    p.classList.remove('visible');
+    p.querySelectorAll('.bbl').forEach(b=>b.classList.remove('match'));
+  }});
   document.querySelectorAll('.ci').forEach(i=>i.classList.remove('active'));
   const p=document.getElementById(id);
   const it=document.getElementById('i'+id);
-  if(p){{p.classList.add('visible');p.querySelector('.msgs').scrollTop=9e9;}}
+  if(p){{
+    p.classList.add('visible');
+    const q=document.getElementById('search').value.toLowerCase();
+    if(q){{
+      // Highlight matching bubbles and scroll to first one
+      let first=null;
+      p.querySelectorAll('.bbl').forEach(b=>{{
+        if(b.textContent.toLowerCase().includes(q)){{b.classList.add('match');if(!first)first=b;}}
+      }});
+      if(first)first.scrollIntoView({{block:'center',behavior:'smooth'}});
+      else p.querySelector('.msgs').scrollTop=9e9;
+    }}else p.querySelector('.msgs').scrollTop=9e9;
+  }}
   if(it)it.classList.add('active');
   document.getElementById('empty').style.display='none';
 }}
 function filter(q){{
   q=q.toLowerCase();
   document.querySelectorAll('.ci').forEach(el=>{{
-    el.style.display=el.querySelector('.cn').textContent.toLowerCase().includes(q)?'':'none';
+    const cp=el.querySelector('.cp');
+    if(!q){{el.style.display='';cp.textContent=cp.dataset.preview;return;}}
+    const nameMatch=el.querySelector('.cn').textContent.toLowerCase().includes(q);
+    const panel=document.getElementById(el.id.replace('i',''));
+    let msgMatch=false;
+    if(panel){{
+      for(const b of panel.querySelectorAll('.bbl')){{
+        const t=b.textContent;
+        if(t.toLowerCase().includes(q)){{
+          msgMatch=true;
+          // If match is in content (not name), update sidebar preview to show snippet
+          if(!nameMatch){{
+            const i=t.toLowerCase().indexOf(q),s=Math.max(0,i-25);
+            cp.textContent=(s?'…':'')+t.slice(s,i+q.length+40)+(i+q.length+40<t.length?'…':'');
+          }}
+          break;
+        }}
+      }}
+    }}
+    if(nameMatch)cp.textContent=cp.dataset.preview;
+    el.style.display=(nameMatch||msgMatch)?'':'none';
   }});
 }}
 </script>
@@ -378,38 +590,72 @@ def show_help():
 {B}sms-export{R} — Export iPhone messages from a local Finder backup to HTML
 
 {B}{Y}USAGE{R}
-  {C}sms-export{R}          Auto-detect backup and open in browser
+  {C}sms-export{R}          Auto-detect backup, generate HTML, open in browser
   {C}sms-export --help{R}   Show this help
 
 {B}{Y}WHAT IT DOES{R}
   1. Finds your iPhone backup in {C}~/Library/Application Support/MobileSync/Backup/{R}
-  2. Reads the SMS/iMessage SQLite database {G}(no decryption needed if unencrypted){R}
-  3. Exports text messages, iMessages, and all attachments to disk
-  4. Opens the HTML viewer in your browser — searchable, with message bubbles
+  2. If multiple backups exist, lists them by device name + date and asks which one to use
+  3. Auto-detects whether the backup is encrypted or not
+     {G}Encrypted   → prompts for your backup password, decrypts on the fly{R}
+     {G}Unencrypted → reads directly, no password needed{R}
+  4. Resolves phone numbers / emails to contact names from the AddressBook in the backup
+  5. Exports all messages + attachments to disk, with a live progress counter
+  6. Opens the HTML viewer in your browser — iMessage-style bubbles, searchable sidebar
 
 {B}{Y}OUTPUT{R}
   {C}~/Documents/YYYY-Month-DD - Backup iMessage iPhone.html{R}  {G}← HTML viewer (date from backup){R}
   {C}~/Documents/YYYY-Month-DD - Backup iMessage iPhone/{R}      {G}← attachments folder{R}
 
+  The HTML references attachments via relative paths — keep both in the same folder.
+
 {B}{Y}ATTACHMENTS{R}
-  {C}Photos{R}    Displayed inline via {C}<img>{R} referencing the attachments folder
+  {C}Photos{R}    Displayed inline via {C}<img>{R}
   {C}Video{R}     Playable inline via {C}<video>{R}
   {C}Audio{R}     Playable inline via {C}<audio>{R}
   {C}Other{R}     Clickable download link
-  {G}If a file is missing from the backup, a "introuvable" badge is shown instead.{R}
+  {G}If a file is missing from the backup, a "not found" badge is shown instead.{R}
+  {G}Plugin payloads (stickers, link previews, Apple Pay) are silently skipped — unrenderable binary blobs.{R}
 
-{B}{Y}MULTIPLE BACKUPS{R}
-  If several backups are found, the script lists them by device name and date:
-    {G}1. iPhone d'Emir  (04/03/2026 14:22){R}
-    {G}2. iPhone Audrey  (15/09/2024 09:11){R}
-  and asks you to pick one.
+{B}{Y}CONTACTS{R}
+  Names are resolved from the AddressBook stored inside the backup — no access to your live
+  Contacts app needed. Phone numbers matched on the last 9 digits (handles +33 vs 06 etc.).
+  Emails matched exactly (case-insensitive).
+  {G}If a contact isn't found, the raw phone number or email is shown.{R}
 
 {B}{Y}REQUIREMENTS{R}
-  {C}Python 3{R}  {G}standard library only, no pip install needed{R}
+  {C}Python 3{R}                   {G}standard library — always available on macOS{R}
+  {C}Full Disk Access{R}           {G}required for your terminal app (to read the backup folder){R}
+                             {G}System Settings → Privacy & Security → Full Disk Access{R}
+                             {G}→ add Terminal / iTerm2 / Warp, then fully relaunch it{R}
+  {C}iphone-backup-decrypt{R}      {G}only needed for encrypted backups{R}
+                             {G}auto-installed by install.sh in an isolated venv: ~/.venv/sms-export/{R}
+                             {G}source: github.com/jsharkey13/iphone_backup_decrypt{R}
 
 {B}{Y}SETUP{R}  {G}(new machine — one time){R}
-  {G}# Plug iPhone → open Finder → select iPhone → Back Up Now{R}
-  {G}# Make sure "Encrypt local backup" is NOT checked{R}
+  {G}# 1. cd ~/dotfiles && ./install.sh{R}
+  {G}#    → creates ~/.venv/sms-export/ and installs iphone-backup-decrypt{R}
+  {G}# 2. Grant Full Disk Access to your terminal (see REQUIREMENTS above){R}
+  {G}# 3. Plug iPhone → open Finder → select iPhone → Back Up Now{R}
+  {G}#    Works with both encrypted and unencrypted backups.{R}
+  {G}#    If encrypted: remember the backup password you set in Finder (≠ iPhone passcode).{R}
+
+{B}{Y}COMPATIBILITY{R}
+  Tested on iOS 17 / macOS 15. The sms.db schema has been stable since iOS 11.
+  The backup file layout (hash = SHA-1 of domain+relativePath) is unchanged since iOS 5.
+  If a future iOS update breaks something:
+    → check for iphone-backup-decrypt updates:
+      {C}~/.venv/sms-export/bin/pip install -U iphone-backup-decrypt{R}
+    → report schema changes at github.com/jsharkey13/iphone_backup_decrypt
+
+{B}{Y}TROUBLESHOOTING{R}
+  {C}Permission denied{R}        Grant Full Disk Access to your terminal and relaunch it
+  {C}No backup found{R}          Plug iPhone → Finder → Back Up Now
+  {C}Wrong password{R}           Backup password is set in Finder, not your iPhone passcode
+  {C}iphone-backup-decrypt{R}    Re-run install.sh, or activate venv manually:
+    {G}source ~/.venv/sms-export/bin/activate && pip install -U iphone-backup-decrypt{R}
+  {C}WARN: decrypted…{R}         Harmless size mismatch warning from the decrypt lib — output is correct
+  {C}Missing images{R}           File wasn't included in the backup (can happen with some media types)
 """)
 
 def main():
@@ -417,16 +663,30 @@ def main():
         show_help()
         sys.exit(0)
 
-    print("🔍 Recherche du backup iPhone...")
-    db_path, backup_dir, backup_date = find_backup()
+    print("🔍 Looking for iPhone backup...")
+    db_path, backup_dir, backup_date, is_encrypted = find_backup()
 
-    print(f"📅 Backup du {backup_date.strftime('%d/%m/%Y %H:%M')}")
-    print("📖 Lecture des messages...")
-    conversations = load_conversations(db_path)
+    enc_backup = None
+    if is_encrypted:
+        print("🔒 Encrypted backup detected — password required.")
+        enc_backup = open_encrypted_backup(backup_dir)
+        print("✅ Backup unlocked.")
+    else:
+        print("🔓 Unencrypted backup — no password needed.")
+
+    print(f"📅 Backup from {backup_date.strftime('%Y-%m-%d %H:%M')}")
+    print("👤 Loading contacts...")
+    contacts = load_contacts(backup_dir, enc_backup)
+    if contacts:
+        print(f"   {len(contacts)} contact entries loaded.")
+    else:
+        print("   No contacts found — phone numbers will be shown as-is.")
+    print("📖 Reading messages...")
+    conversations = load_conversations(db_path, enc_backup, contacts)
 
     total = sum(len(c["messages"]) for c in conversations.values())
     print(f"✅ {len(conversations)} conversations · {total} messages")
-    print("📎 Export des pièces jointes + génération du HTML...")
+    print("📎 Exporting attachments and generating HTML...")
 
     month_name = backup_date.strftime("%B")
     base_name  = f"{backup_date.strftime('%Y')}-{month_name}-{backup_date.strftime('%d')} - Backup iMessage iPhone"
@@ -434,13 +694,14 @@ def main():
     atts_dir   = docs / base_name
     atts_dir.mkdir(parents=True, exist_ok=True)
 
-    html   = generate_html(conversations, backup_dir, backup_date, atts_dir, base_name)
+    html   = generate_html(conversations, backup_dir, enc_backup,
+                           backup_date, atts_dir, base_name)
     output = docs / f"{base_name}.html"
     output.write_text(html, encoding="utf-8")
 
     att_count = sum(1 for _ in atts_dir.iterdir())
-    print(f"✅ Exporté : {output}")
-    print(f"📁 Pièces jointes : {atts_dir}  ({att_count} fichiers)")
+    print(f"✅ Exported: {output}")
+    print(f"📁 Attachments: {atts_dir}  ({att_count} files)")
     webbrowser.open(f"file://{output}")
     subprocess.run(["afplay", "/System/Library/Sounds/Funk.aiff"], check=False)
 

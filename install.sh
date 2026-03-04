@@ -14,6 +14,10 @@ if [ "$OS" = "Darwin" ]; then
   brew install bat eza fd zoxide ripgrep btop zsh-autosuggestions jq ffmpeg
   brew install --cask font-jetbrains-mono-nerd-font hammerspoon
 
+  echo "🐍 Setting up sms-export venv..."
+  python3 -m venv "$HOME/.venv/sms-export"
+  "$HOME/.venv/sms-export/bin/pip" install --quiet iphone-backup-decrypt
+
 elif [ "$OS" = "Linux" ]; then
   # Linux (Ubuntu/Debian)
   sudo apt update

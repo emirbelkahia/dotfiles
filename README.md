@@ -98,22 +98,45 @@ cmake --build ~/whisper.cpp/build --config Release
 
 ### `sms-export` — iPhone messages to HTML
 
-Exports all iMessage/SMS conversations from a local Finder backup to a standalone HTML file. No iCloud, no paid tools.
+Exports all iMessage/SMS conversations from a local Finder backup to a browsable HTML file. No iCloud, no paid tools, no manual setup beyond `install.sh`.
 
 ```bash
-sms-export        # auto-detect backup, generate ~/Desktop/messages_iphone.html
+sms-export        # auto-detect backup, generate HTML, open in browser
 sms-export --help
 ```
 
-Output:
+**Output:**
 - `~/Documents/YYYY-Month-DD - Backup iMessage iPhone.html` — HTML viewer (date from the backup)
 - `~/Documents/YYYY-Month-DD - Backup iMessage iPhone/` — attachments folder (photos, videos, audio, other files)
 
-The HTML references attachments via relative paths — no base64 embedding. Images shown inline, video/audio playable via native HTML5 tags, other files as download links. If a file is missing from the backup, a badge is shown instead.
+The HTML references attachments via relative paths — keep both in the same folder. Images shown inline, video/audio playable via native HTML5 tags, other files as download links. If a file is missing from the backup, a badge is shown. Plugin payloads (stickers, link previews, Apple Pay) are silently skipped.
 
-If several backups are found, the script lists them by device name and date and asks which one to use.
+**Features:**
+- Works with both **encrypted** and unencrypted backups — prompts for password, decrypts on the fly
+- **Contact name resolution** from the AddressBook in the backup — phone numbers shown as real names where possible (last-9-digit matching to handle +33 vs 06 etc.)
+- **Multiple backups**: if several are found, lists them by device name and date and asks which one to use
+- **Visual progress bars** during message loading and attachment export
+- **Date range header** — shows `📅 Mar 2022 → Mar 2026` at the top of the sidebar so you always know which period of messages is covered
+- iMessage-style bubble UI — search by name or message content, matching bubbles highlighted and auto-scrolled to on open
 
-**Requirements:** a local (unencrypted) iPhone backup made via Finder. Plug iPhone → open Finder → select iPhone → *Back Up Now* (ensure "Encrypt local backup" is **not** checked).
+**Requirements:**
+
+| Requirement | Notes |
+|-------------|-------|
+| Python 3 | Standard library — always available on macOS |
+| Full Disk Access | Required for your terminal app — System Settings → Privacy & Security → Full Disk Access → add Terminal / iTerm2 / Warp, then relaunch |
+| `iphone-backup-decrypt` | Only for encrypted backups — auto-installed by `install.sh` in `~/.venv/sms-export/` |
+| Local iPhone backup | Plug iPhone → Finder → *Back Up Now* (encrypted or not — both work) |
+
+**First-time setup on a new machine:**
+
+1. Run `./install.sh` — creates `~/.venv/sms-export/` and installs `iphone-backup-decrypt`
+2. Grant **Full Disk Access** to your terminal (see table above)
+3. Make a backup: plug iPhone → open Finder → select iPhone → *Back Up Now*
+
+> If your backup is encrypted, the password is what you set in Finder — not your iPhone passcode.
+
+**Compatibility:** tested on iOS 17 / macOS 15. The `sms.db` schema has been stable since iOS 11 and the backup hash format since iOS 5. If a future iOS update breaks something, check for library updates: `~/.venv/sms-export/bin/pip install -U iphone-backup-decrypt`.
 
 ### `wt` — whisper transcribe
 
