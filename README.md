@@ -11,6 +11,7 @@ Config files for my terminal setup.
 | `macos.sh` | macOS `defaults write` optimizations (animations, keyboard, Finder, screenshots) |
 | `hammerspoon/init.lua` | Hammerspoon config — time overlay on `Cmd+Alt+T` |
 | `bin/` | Personal CLI scripts — symlinked to `~/bin`, on PATH |
+| `lib/` | Internal scripts used by `bin/` tools — not exposed on PATH |
 | `CHANGELOG.md` | Changes history |
 
 ## Tools used
@@ -74,7 +75,7 @@ ooo --help                 # full usage and setup instructions
 
 ### `tc` — transcribe call
 
-Pure bash. Detects today's (or yesterday's) call recording in `~/Movies`, transcribes with Whisper large-v3-turbo + optional VAD, generates a Slack-ready CSM internal update prompt, opens it in TextEdit.
+Pure bash. Auto-detects the most recent call recording in `~/Movies` (up to 15 days back), transcribes with Whisper large-v3-turbo + optional VAD, optionally diarizes the transcript (speaker labels via pyannote), generates a Slack-ready CSM internal update prompt, opens it in TextEdit.
 
 ```bash
 tc          # interactive
@@ -83,18 +84,30 @@ tc --help   # full usage, setup instructions, output paths
 
 Output:
 - `~/Movies/YYYY-MM-DD_call-name.txt` — transcript
+- `~/Movies/YYYY-MM-DD_call-name-diarized.txt` — transcript with speaker labels (if diarization enabled)
 - `~/Notes/Calls/YYYY-MM-DD_call-name_prompt.txt` — generated prompt
 
 **First-time setup on a new machine:**
 
 1. Clone and build whisper.cpp:
 ```bash
-git clone https://github.com/ggerganov/whisper.cpp.git ~/whisper.cpp
+git clone https://github.com/ggml-org/whisper.cpp.git ~/whisper.cpp
 cmake -B ~/whisper.cpp/build ~/whisper.cpp
 cmake --build ~/whisper.cpp/build --config Release
 ```
 2. Download models into `~/whisper.cpp/models/` — see `tc --help`
 3. `ffmpeg` is handled by `install.sh`
+
+**Optional: speaker diarization**
+
+Requires a free [HuggingFace](https://huggingface.co) account. One-time setup:
+
+1. Accept model licenses: [speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1) and [segmentation-3.0](https://huggingface.co/pyannote/segmentation-3.0)
+2. Create a READ token at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)
+3. Add to `~/.zshrc` (not committed — it's a secret): `export HF_TOKEN="hf_xxx"`
+4. Run `install.sh` — creates `~/.venv/tc-diarize/` with pyannote.audio
+
+If `HF_TOKEN` is not set or diarization fails for any reason, `tc` falls back silently to the plain transcript. Whisper transcription always works independently.
 
 ### `sms-export` — iPhone messages to HTML
 

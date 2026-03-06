@@ -28,23 +28,26 @@ show_help() {
   printf "${b}tc${r} — Transcribe a call recording and generate a CSM summary prompt\n"
   printf "\n"
   printf "${b}${y}USAGE${r}\n"
-  printf "  ${c}tc${r}          Interactive — auto-detects today's or yesterday's recording\n"
+  printf "  ${c}tc${r}          Interactive — auto-detects the most recent recording (up to 15 days back)\n"
   printf "  ${c}tc --help${r}   Show this help\n"
   printf "\n"
   printf "${b}${y}WHAT IT DOES${r}\n"
-  printf "  1. Auto-detects today's (or yesterday's) call recording in ${c}~/Movies${r}\n"
+  printf "  1. Auto-detects the most recent call recording in ${c}~/Movies${r} (up to 15 days back)\n"
   printf "  2. Converts audio to WAV 16kHz mono via ffmpeg\n"
   printf "  3. Transcribes with Whisper large-v3-turbo + optional VAD\n"
-  printf "  4. Generates a CSM internal Slack-ready Markdown prompt\n"
-  printf "  5. Opens the prompt in TextEdit — paste into Claude or ChatGPT\n"
+  printf "  4. Optionally diarizes the transcript (speaker labels) via pyannote\n"
+  printf "  5. Generates a CSM internal Slack-ready Markdown prompt\n"
+  printf "  6. Opens the prompt in TextEdit — paste into Claude or ChatGPT\n"
   printf "\n"
   printf "${b}${y}OUTPUT${r}\n"
   printf "  ${c}~/Movies/YYYY-MM-DD_call-name.txt${r}              ${g}← transcript${r}\n"
+  printf "  ${c}~/Movies/YYYY-MM-DD_call-name-diarized.txt${r}     ${g}← transcript with speaker labels (optional)${r}\n"
   printf "  ${c}~/Notes/Calls/YYYY-MM-DD_call-name_prompt.txt${r}  ${g}← generated prompt${r}\n"
   printf "\n"
   printf "${b}${y}DEPENDENCIES${r}\n"
   printf "  ${c}ffmpeg${r}       ${g}brew install ffmpeg  (handled by install.sh)${r}\n"
   printf "  ${c}whisper.cpp${r}  ${g}see SETUP below${r}\n"
+  printf "  ${c}HF_TOKEN${r}     ${g}optional — required for speaker diarization (see install.sh)${r}\n"
   printf "\n"
   printf "${b}${y}SETUP${r}  ${g}(new machine — one time)${r}\n"
   printf "  ${g}# 1. Clone and build whisper.cpp${r}\n"
@@ -72,106 +75,123 @@ TODAY=$(date "+%Y-%m-%d")
 # Cleanup on abnormal exit
 cleanup() {
   if [[ -n "${WAV_PATH:-}" && -f "$WAV_PATH" ]]; then rm -f "$WAV_PATH"; fi
+  if [[ -n "${VTT_PATH:-}" && -f "$VTT_PATH" ]]; then rm -f "$VTT_PATH"; fi
 }
 trap cleanup EXIT
 
 echo "═══════════════════════════════════════════════════════════════"
-echo "  🎙️  Transcription Call v3 - avec VAD (Voice Activity Detection)"
+echo "  🎙️  Transcript Call — Whisper + VAD + Diarization"
 echo "═══════════════════════════════════════════════════════════════"
 echo ""
 
 # === FIND VIDEO FILE ===
-IFS=$'\n' read -r -d '' -a CALLS_TODAY < <(find "$MOVIES_DIR" -type f \( -name "${TODAY}*.mov" -o -name "${TODAY}*.mp4" \) | sort && printf '\0')
+# Look for recordings from today first, then fall back up to 15 days back
+CALLS_FOUND=()
 SEARCH_DATE="$TODAY"
-CALLS_FOUND=("${CALLS_TODAY[@]+"${CALLS_TODAY[@]}"}")
 
-# If nothing found today, look at yesterday
-if [ ${#CALLS_FOUND[@]} -eq 0 ]; then
-  YESTERDAY=$(date -d "yesterday" "+%Y-%m-%d" 2>/dev/null || date -v-1d "+%Y-%m-%d")
-  echo "🔍 Aucun fichier trouvé aujourd'hui ($TODAY), recherche hier ($YESTERDAY)..."
-  IFS=$'\n' read -r -d '' -a CALLS_YESTERDAY < <(find "$MOVIES_DIR" -type f \( -name "${YESTERDAY}*.mov" -o -name "${YESTERDAY}*.mp4" \) | sort && printf '\0')
-
-  if [ ${#CALLS_YESTERDAY[@]} -gt 0 ]; then
-    echo "📂 ${#CALLS_YESTERDAY[@]} fichier(s) trouvé(s) hier."
-    read -r -p "Veux-tu procéder avec un fichier d'hier ? (o/N) : " PROCEED_YESTERDAY
-    PROCEED_YESTERDAY=$(echo "$PROCEED_YESTERDAY" | tr '[:upper:]' '[:lower:]')
-
-    if [[ "$PROCEED_YESTERDAY" =~ ^(o|oui|y|yes)$ ]]; then
-      SEARCH_DATE="$YESTERDAY"
-      CALLS_FOUND=("${CALLS_YESTERDAY[@]+"${CALLS_YESTERDAY[@]}"}")
-    else
-      echo "👋 Opération annulée."
-      exit 0
+for i in $(seq 0 14); do
+  CANDIDATE_DATE=$(date -v-${i}d "+%Y-%m-%d" 2>/dev/null || date -d "-${i} days" "+%Y-%m-%d")
+  IFS=$'\n' read -r -d '' -a CANDIDATE_FILES < <(find "$MOVIES_DIR" -type f \( -name "${CANDIDATE_DATE}*.mov" -o -name "${CANDIDATE_DATE}*.mp4" \) | sort && printf '\0')
+  if [ ${#CANDIDATE_FILES[@]} -gt 0 ]; then
+    CALLS_FOUND=("${CANDIDATE_FILES[@]}")
+    SEARCH_DATE="$CANDIDATE_DATE"
+    if [ "$i" -gt 0 ]; then
+      echo "🔍 No file found today ($TODAY) — nearest recording found: $SEARCH_DATE"
     fi
-  else
-    SEARCH_DATE="$YESTERDAY"
-    CALLS_FOUND=("${CALLS_YESTERDAY[@]+"${CALLS_YESTERDAY[@]}"}")
+    break
   fi
-fi
+done
 
 if [ ${#CALLS_FOUND[@]} -eq 0 ]; then
-  echo "❌ Aucun fichier .mov ou .mp4 trouvé aujourd'hui ($TODAY) ni hier (${YESTERDAY:-inconnu})"
+  echo "❌ No .mov or .mp4 file found in the last 15 days."
   afplay /System/Library/Sounds/Basso.aiff || true
   exit 1
 elif [ ${#CALLS_FOUND[@]} -eq 1 ]; then
   SELECTED_FILE="${CALLS_FOUND[0]}"
-  echo "📹 Fichier détecté : $SELECTED_FILE"
+  echo "📹 File detected: $SELECTED_FILE"
 else
-  echo "📋 Plusieurs fichiers trouvés le $SEARCH_DATE. Lequel veux-tu utiliser ?"
+  echo "📋 Multiple files found on $SEARCH_DATE. Which one?"
   select OPTION in "${CALLS_FOUND[@]}"; do
     if [[ -n "${OPTION:-}" ]]; then
       SELECTED_FILE="$OPTION"
       break
     else
-      echo "❌ Choix invalide, essaie encore"
+      echo "❌ Invalid choice, try again"
     fi
   done
 fi
 
 # === CALL NAME ===
 echo ""
-read -r -p "📝 Nom du call (ex: demo-client-x) : " CALL_NAME
+read -r -p "📝 Call name (e.g. demo-client-x) : " CALL_NAME
 CALL_NAME_CLEAN=$(echo "$CALL_NAME" | tr ' ' '-' | tr -cd '[:alnum:]-_')
 BASENAME="${SEARCH_DATE}_${CALL_NAME_CLEAN}"
 WAV_PATH="$MOVIES_DIR/${BASENAME}.wav"
 TXT_PATH="$MOVIES_DIR/${BASENAME}.txt"
+VTT_PATH="$MOVIES_DIR/${BASENAME}.vtt"
 RAW_TRANSCRIPT="${WAV_PATH}.txt"
+RAW_VTT="${WAV_PATH}.vtt"
 PROMPT_PATH="$NOTES_DIR/${BASENAME}_prompt.txt"
 
 # === LANGUAGE ===
 DEFAULT_LANG="fr"
-read -r -p "🌍 Langue du call (code 2 lettres, ex: fr/en) [${DEFAULT_LANG}] ou 'auto' : " LANGUAGE
+read -r -p "🌍 Call language (2-letter code, e.g. fr/en) [${DEFAULT_LANG}] or 'auto' : " LANGUAGE
 LANGUAGE=${LANGUAGE:-$DEFAULT_LANG}
 LANGUAGE=$(echo "$LANGUAGE" | tr '[:upper:]' '[:lower:]')
 
 if ! [[ "$LANGUAGE" =~ ^[a-z]{2}$ || "$LANGUAGE" == "auto" ]]; then
-  echo "⚠️ Code langue invalide. Utilisation du défaut '${DEFAULT_LANG}'."
+  echo "⚠️  Invalid language code. Using default '${DEFAULT_LANG}'."
   LANGUAGE="$DEFAULT_LANG"
 fi
 
 # === VAD CONFIGURATION ===
 echo ""
-echo "🎯 Voice Activity Detection (VAD) - Filtre les silences pour éviter les hallucinations"
-read -r -p "   Activer VAD ? (O/n) [O] : " VAD_CHOICE
-VAD_CHOICE=$(echo "${VAD_CHOICE:-o}" | tr '[:upper:]' '[:lower:]')
+echo "🎯 Voice Activity Detection (VAD) — filters silence to prevent hallucinations"
+read -r -p "   Enable VAD? (Y/n) [Y] : " VAD_CHOICE
+VAD_CHOICE=$(echo "${VAD_CHOICE:-y}" | tr '[:upper:]' '[:lower:]')
 
-if [[ "$VAD_CHOICE" =~ ^(n|no|non)$ ]]; then
+if [[ "$VAD_CHOICE" =~ ^(n|no)$ ]]; then
   VAD_ENABLED=false
-  echo "   ⚠️  VAD désactivé - risque d'hallucinations sur les silences"
+  echo "   ⚠️  VAD disabled — hallucinations on silent parts are possible"
 else
   VAD_ENABLED=true
-  echo "   ✅ VAD activé"
+  echo "   ✅ VAD enabled"
 
   if [ ! -f "$VAD_MODEL" ]; then
-    echo "   ❌ Modèle VAD non trouvé: $VAD_MODEL"
-    echo "   Téléchargement nécessaire ou désactivation du VAD."
+    echo "   ❌ VAD model not found: $VAD_MODEL"
+    echo "   Download it or disable VAD."
     VAD_ENABLED=false
   else
-    read -r -p "   Seuil VAD (0.3=sensible, 0.5=normal, 0.7=strict) [0.5] : " VAD_THRESHOLD_INPUT
+    read -r -p "   VAD threshold (0.3=sensitive, 0.5=normal, 0.7=strict) [0.5] : " VAD_THRESHOLD_INPUT
     if [[ -n "$VAD_THRESHOLD_INPUT" && "$VAD_THRESHOLD_INPUT" =~ ^0\.[0-9]+$ ]]; then
       VAD_THRESHOLD="$VAD_THRESHOLD_INPUT"
     fi
-    echo "   Seuil: $VAD_THRESHOLD"
+    echo "   Threshold: $VAD_THRESHOLD"
+  fi
+fi
+
+# === DIARIZATION CONFIGURATION ===
+DIARIZE_ENABLED=false
+DIARIZE_VENV="$HOME/.venv/tc-diarize"
+DIARIZE_SCRIPT="$HOME/dotfiles/lib/tcd.py"
+
+echo ""
+echo "🎙️  Speaker diarization — labels each segment with SPEAKER_00, SPEAKER_01..."
+
+if [[ -z "${HF_TOKEN:-}" ]]; then
+  echo "   ⚠️  Unavailable — HF_TOKEN not set in ~/.zshrc (see install.sh)"
+elif [[ ! -f "$DIARIZE_VENV/bin/python3" ]]; then
+  echo "   ⚠️  Unavailable — venv missing, re-run install.sh"
+elif [[ ! -f "$DIARIZE_SCRIPT" ]]; then
+  echo "   ⚠️  Unavailable — tcd.py missing from ~/dotfiles/lib/"
+else
+  read -r -p "   Enable? (Y/n) [Y] : " DIARIZE_CHOICE
+  DIARIZE_CHOICE=$(echo "${DIARIZE_CHOICE:-y}" | tr '[:upper:]' '[:lower:]')
+  if [[ ! "$DIARIZE_CHOICE" =~ ^(n|no)$ ]]; then
+    DIARIZE_ENABLED=true
+    echo "   ✅ Diarization enabled"
+  else
+    echo "   ⏭️  Diarization disabled"
   fi
 fi
 
@@ -181,23 +201,23 @@ USE_EXISTING=""
 
 if [ ${#TXT_CANDIDATES[@]} -gt 0 ]; then
   echo ""
-  echo "📄 Des transcriptions .txt existent déjà pour le $SEARCH_DATE. Tu veux en utiliser une ?"
-  select EXISTING_TXT in "${TXT_CANDIDATES[@]}" "Entrée pour une nouvelle transcription"; do
+  echo "📄 Existing transcripts found for $SEARCH_DATE. Use one?"
+  select EXISTING_TXT in "${TXT_CANDIDATES[@]}" "Create a new transcript"; do
     if [[ "$REPLY" == "$((${#TXT_CANDIDATES[@]}+1))" ]] || [[ -z "${REPLY:-}" ]]; then
-      echo "👉 Ok, on va en créer une nouvelle."
+      echo "👉 Creating a new transcript."
       break
     elif [[ -n "${EXISTING_TXT:-}" ]]; then
       USE_EXISTING="$EXISTING_TXT"
-      echo "✅ On va utiliser : $USE_EXISTING"
+      echo "✅ Using: $USE_EXISTING"
       if [[ "$(realpath "$USE_EXISTING")" != "$(realpath "$TXT_PATH" 2>/dev/null || echo "$TXT_PATH")" ]]; then
         cp "$USE_EXISTING" "$TXT_PATH"
       else
-        echo "ℹ️  Fichier déjà au bon emplacement, pas besoin de copier."
+        echo "ℹ️  File already in place, no copy needed."
       fi
       TXT_PATH="$USE_EXISTING"
       break
     else
-      echo "❌ Choix invalide, essaie encore"
+      echo "❌ Invalid choice, try again"
     fi
   done
 fi
@@ -205,25 +225,28 @@ fi
 # === TRANSCRIBE ===
 if [ ! -f "$TXT_PATH" ]; then
   echo ""
-  echo "🎧 Conversion en WAV (16kHz mono)..."
+  echo "🎧 Converting to WAV (16kHz mono)..."
   ffmpeg -y -i "$SELECTED_FILE" -ar $SAMPLE_RATE -ac 1 -c:a pcm_s16le "$WAV_PATH" 2>/dev/null
 
   DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$WAV_PATH" 2>/dev/null | cut -d. -f1)
   DURATION_MIN=$((DURATION / 60))
   DURATION_SEC=$((DURATION % 60))
-  echo "   Durée: ${DURATION_MIN}m ${DURATION_SEC}s"
+  echo "   Duration: ${DURATION_MIN}m ${DURATION_SEC}s"
 
   echo ""
-  echo "🧠 Transcription avec Whisper..."
+  echo "🧠 Transcribing with Whisper..."
 
   WHISPER_ARGS=(-m "$WHISPER_MODEL" -f "$WAV_PATH" -otxt)
+  if [[ "$DIARIZE_ENABLED" == true ]]; then
+    WHISPER_ARGS+=(-ovtt)
+  fi
 
   if [[ "$LANGUAGE" != "auto" ]]; then
     WHISPER_ARGS+=(--language "$LANGUAGE")
   fi
 
   if [[ "$VAD_ENABLED" == true ]]; then
-    echo "   🎯 VAD activé (seuil: $VAD_THRESHOLD)"
+    echo "   🎯 VAD enabled (threshold: $VAD_THRESHOLD)"
     WHISPER_ARGS+=(--vad)
     WHISPER_ARGS+=(--vad-model "$VAD_MODEL")
     WHISPER_ARGS+=(--vad-threshold "$VAD_THRESHOLD")
@@ -233,20 +256,56 @@ if [ ! -f "$TXT_PATH" ]; then
 
   if [ -f "$RAW_TRANSCRIPT" ]; then
     mv "$RAW_TRANSCRIPT" "$TXT_PATH"
-    rm -f "$WAV_PATH"
+    if [[ "$DIARIZE_ENABLED" == true && -f "$RAW_VTT" ]]; then
+      mv "$RAW_VTT" "$VTT_PATH"
+    fi
+    if [[ "$DIARIZE_ENABLED" != true ]]; then
+      rm -f "$WAV_PATH"
+    fi
     LINE_COUNT=$(wc -l < "$TXT_PATH" | tr -d ' ')
     echo ""
-    echo "✅ Transcription terminée: $LINE_COUNT lignes"
+    echo "✅ Transcription done: $LINE_COUNT lines"
   else
-    echo "❌ Erreur : transcription manquante."
+    echo "❌ Error: transcript missing."
     afplay /System/Library/Sounds/Basso.aiff || true
     exit 1
   fi
 fi
 
+# === DIARIZATION ===
+if [[ "$DIARIZE_ENABLED" == true ]]; then
+  # If we used an existing transcript, WAV/VTT may not exist — re-create them
+  if [[ ! -f "$WAV_PATH" ]]; then
+    echo ""
+    echo "🎧 Re-converting to WAV for diarization..."
+    ffmpeg -y -i "$SELECTED_FILE" -ar $SAMPLE_RATE -ac 1 -c:a pcm_s16le "$WAV_PATH" 2>/dev/null
+  fi
+  if [[ ! -f "$VTT_PATH" ]]; then
+    echo "   Generating timestamps (VTT) for alignment..."
+    "$WHISPER_BIN" -m "$WHISPER_MODEL" -f "$WAV_PATH" -ovtt --language "$LANGUAGE" 2>/dev/null
+    [[ -f "$RAW_VTT" ]] && mv "$RAW_VTT" "$VTT_PATH"
+  fi
+
+  DIARIZED_TXT="${TXT_PATH%.txt}-diarized.txt"
+  echo ""
+  echo "🎙️  Running diarization (may take 1-2 min)..."
+
+  if "$DIARIZE_VENV/bin/python3" "$DIARIZE_SCRIPT" "$WAV_PATH" "$VTT_PATH" > "$DIARIZED_TXT" 2>/tmp/tcd-error.log; then
+    TXT_PATH="$DIARIZED_TXT"
+    LINE_COUNT=$(wc -l < "$TXT_PATH" | tr -d ' ')
+    echo "   ✅ Diarization done: $LINE_COUNT segments → $DIARIZED_TXT"
+  else
+    echo "   ⚠️  Diarization failed — falling back to plain transcript"
+    echo "   $(tail -1 /tmp/tcd-error.log)"
+    rm -f "$DIARIZED_TXT"
+  fi
+
+  rm -f "$WAV_PATH" "$VTT_PATH"
+fi
+
 # === CONTEXT + PROMPT ===
 echo ""
-read -r -p "🧾 Quel est le contexte du call ? (client, enjeux, objectif) : " CONTEXT
+read -r -p "🧾 Call context (client, stakes, objective) : " CONTEXT
 
 TRANSCRIPT=$(cat "$TXT_PATH")
 
@@ -287,10 +346,10 @@ EOF
 echo "$PROMPT" > "$PROMPT_PATH"
 echo ""
 echo "═══════════════════════════════════════════════════════════════"
-echo "✅ Terminé !"
+echo "✅ Done!"
 echo ""
-echo "📄 Transcription : $TXT_PATH"
-echo "📝 Prompt ChatGPT : $PROMPT_PATH"
+echo "📄 Transcript : $TXT_PATH"
+echo "📝 Prompt     : $PROMPT_PATH"
 echo "═══════════════════════════════════════════════════════════════"
 
 open -a TextEdit "$PROMPT_PATH"
