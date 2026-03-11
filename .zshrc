@@ -22,7 +22,6 @@ alias cat="bat"
 alias grep="rg"
 alias top="btop"
 alias find="fd"
-alias claude-mem='bun "/Users/emir.belkahia/.claude/plugins/marketplaces/thedotmack/plugin/scripts/worker-service.cjs"'
 alias claude-sonnet='claude --model sonnet --dangerously-skip-permissions'
 alias claude-haiku='claude --model haiku --dangerously-skip-permissions'
 alias claude-opus='claude --model opus --dangerously-skip-permissions'
