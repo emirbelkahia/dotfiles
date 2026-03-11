@@ -97,4 +97,64 @@ ln -sf "$HOME/dotfiles/bin" "$HOME/bin"
 mkdir -p "$HOME/.hammerspoon"
 ln -sf "$HOME/dotfiles/hammerspoon/init.lua" "$HOME/.hammerspoon/init.lua"
 
+# ---------------------------------------------------------------------------
+# Claude Code — MCP servers
+# ---------------------------------------------------------------------------
+# MCP (Model Context Protocol) servers are external tools that Claude Code
+# can use during conversations (read/write tasks, browse the web, send emails…).
+#
+# They are registered via `claude mcp add` (writes to ~/.claude.json) or via
+# ~/.mcp.json (read automatically by Claude Code at startup).
+#
+# Each server is a small process that runs ONLY while a Claude Code session
+# is active (stdio transport, no daemon, no open port).
+#
+# The `claude mcp add` commands below are idempotent — re-running them
+# overwrites the existing entry with the same config.
+#
+# Playwright and other marketplace plugins are installed via
+# `claude plugin install` and are NOT managed here.
+# ---------------------------------------------------------------------------
+if command -v claude &>/dev/null; then
+  echo "🤖 Registering Claude Code MCP servers..."
+
+  # Things 3 — task manager (read via SQLite, write via Things URL scheme)
+  # Requires: Things 3 for macOS, "Enable Things URLs" in Things → Settings → General
+  # Package: https://github.com/hald/things-mcp (uvx auto-downloads from PyPI)
+  claude mcp add things -s user -- uvx things-mcp
+  echo "   ✅ things-mcp"
+
+  # Gmail — send, read, search, reply, manage emails with attachments
+  # Custom server: ~/code/gmail-mcp-server (github.com/emirbelkahia/gmail-mcp-server)
+  # Requires: one-time OAuth setup — see ~/code/gmail-mcp-server/README.md
+  # Registered via ~/.mcp.json (not `claude mcp add`) because it uses an absolute
+  # path to a local venv, which is easier to manage in a static JSON file.
+  GMAIL_MCP="$HOME/code/gmail-mcp-server"
+  if [ -f "$GMAIL_MCP/server.py" ]; then
+    # Create venv and install deps if missing
+    if [ ! -d "$GMAIL_MCP/.venv" ]; then
+      echo "   🐍 Setting up gmail-mcp-server venv..."
+      python3 -m venv "$GMAIL_MCP/.venv"
+      "$GMAIL_MCP/.venv/bin/pip" install --quiet -r "$GMAIL_MCP/requirements.txt"
+    fi
+    # Write ~/.mcp.json (Claude Code reads this at startup)
+    cat > "$HOME/.mcp.json" <<MCPEOF
+{
+  "mcpServers": {
+    "gmail": {
+      "command": "$GMAIL_MCP/.venv/bin/python",
+      "args": ["$GMAIL_MCP/server.py"]
+    }
+  }
+}
+MCPEOF
+    echo "   ✅ gmail-mcp-server (via ~/.mcp.json)"
+  else
+    echo "   ⏭️  gmail-mcp-server not found at $GMAIL_MCP — skipping"
+    echo "      Clone it: git clone git@github.com:emirbelkahia/gmail-mcp-server.git $GMAIL_MCP"
+  fi
+else
+  echo "⏭️  Claude Code not installed — skipping MCP server registration"
+fi
+
 echo "✅ Done. Run 'source ~/.zshrc' to apply."

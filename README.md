@@ -163,6 +163,30 @@ wt --help
 
 > For whisper.cpp setup, see `tc --help`.
 
+## Claude Code — MCP servers
+
+[MCP servers](https://modelcontextprotocol.io/) are external tools that Claude Code can call during conversations (manage tasks, send emails, browse the web…). They run **only while a Claude Code session is active** — no background daemon, no open port, no persistent RAM usage.
+
+`install.sh` registers the following MCP servers:
+
+| Server | Source | What it does | Config | Requires |
+|--------|--------|--------------|--------|----------|
+| `things` | [hald/things-mcp](https://github.com/hald/things-mcp) | Read/write Things 3 tasks, projects, areas, tags | `claude mcp add` → `~/.claude.json` | Things 3 + "Enable Things URLs" in Settings → General |
+| `gmail` | [emirbelkahia/gmail-mcp-server](https://github.com/emirbelkahia/gmail-mcp-server) | Send, read, search, reply, manage emails + attachments | `~/.mcp.json` (static file) | One-time OAuth setup — see repo README |
+
+**How they're installed:**
+
+- `things` uses `uvx` (Python package runner) — downloaded on-the-fly and cached in `~/Library/Caches/uv/`. No global install. Registered via `claude mcp add`.
+- `gmail` is a custom server at `~/code/gmail-mcp-server/` with its own venv. Registered via `~/.mcp.json` because it points to a local venv path. `install.sh` creates the venv and writes `~/.mcp.json` automatically.
+
+**Adding a new MCP server:**
+
+1. Add the registration logic to `install.sh` (either `claude mcp add` or `~/.mcp.json`)
+2. Document it in the table above
+3. Log it in `CHANGELOG.md`
+
+> Playwright and other marketplace plugins are installed via `claude plugin install` and are **not** managed by this repo.
+
 ## Claude aliases
 
 Three aliases to launch Claude CLI directly with a specific model and `--dangerously-skip-permissions`:

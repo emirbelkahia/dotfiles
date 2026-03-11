@@ -2,6 +2,15 @@
 
 All notable changes to this repository are documented in this file.
 
+## 2026-03-11
+
+### Added
+
+- **Claude Code MCP servers** — `install.sh` now registers MCP (Model Context Protocol) servers so Claude Code can interact with external tools during conversations. Runs only during active Claude Code sessions (stdio transport, no daemon). Skipped gracefully if `claude` CLI is not installed. Block is idempotent — safe to re-run. Two servers:
+  - `things` ([hald/things-mcp](https://github.com/hald/things-mcp)) — read/write Things 3 tasks. Downloaded on-the-fly via `uvx`, cached in `~/Library/Caches/uv/`. Registered via `claude mcp add` → `~/.claude.json`.
+  - `gmail` ([emirbelkahia/gmail-mcp-server](https://github.com/emirbelkahia/gmail-mcp-server)) — send, read, search, reply, manage emails. Custom server at `~/code/gmail-mcp-server/`. Registered via `~/.mcp.json`. `install.sh` creates the venv and writes the config file. Requires one-time OAuth setup (see repo README).
+- `README.md` — new "Claude Code — MCP servers" section with server table, how each is installed, and instructions for adding new servers.
+
 ## 2026-03-04 (4)
 
 ### Changed
